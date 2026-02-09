@@ -17,16 +17,18 @@ logger = logging.getLogger(__name__)
 TR_VOLUME_RANK = "FHPST01710000"
 
 SCAN_SYSTEM_PROMPT = """당신은 주식 종목 선별 전문가입니다.
-거래량 상위 종목 데이터를 분석하여 단기 매매에 유망한 종목을 선별해주세요.
+거래량 상위 종목과 급등/급락 종목 데이터를 분석하여 매매에 유망한 종목을 선별해주세요.
 
 선별 기준:
-- 거래량이 평소 대비 급증한 종목 (관심 증가)
-- 상승 추세의 초기 단계로 보이는 종목
-- 과도하게 급등하여 리스크가 높은 종목은 제외
-- 시가총액이 너무 작은 종목(투기성) 제외
+- 거래량이 평소 대비 급증한 종목 (관심 증가, 유동성 확보)
+- 적절한 변동성이 있는 종목 (일 변동폭 1~5% 수준)
+- 상승 추세의 초기 단계로 보이는 종목 (모멘텀)
+- 과매도 구간에서 반등 조짐이 보이는 종목 (평균 회귀)
+- 과도하게 급등(+10% 이상)하여 리스크가 높은 종목은 제외
+- 시가총액이 너무 작은 종목(투기성)은 제외
 
 반드시 아래 JSON 형식으로만 응답하세요:
-{"picks": [{"symbol": "종목코드", "reason": "선별 사유"}], "summary": "시장 분위기 한줄 요약"}
+{"picks": [{"symbol": "종목코드", "reason": "선별 사유"}], "market_sentiment": "bullish 또는 bearish 또는 neutral", "summary": "시장 분위기 한줄 요약"}
 
 최대 5개 종목만 선별하세요. 유망 종목이 없으면 빈 리스트를 반환하세요."""
 
@@ -139,13 +141,18 @@ class StockScanner:
     def _call_ai(self, prompt: str) -> str:
         """AI API를 호출한다."""
         if self.ai_provider == "gemini":
-            import google.generativeai as genai
-            genai.configure(api_key=self.ai_api_key)
-            model = genai.GenerativeModel(
-                model_name=self.ai_model or "gemini-2.0-flash",
-                system_instruction=SCAN_SYSTEM_PROMPT,
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=self.ai_api_key)
+            response = client.models.generate_content(
+                model=self.ai_model or "gemini-2.0-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SCAN_SYSTEM_PROMPT,
+                    max_output_tokens=512,
+                ),
             )
-            response = model.generate_content(prompt)
             return response.text
         elif self.ai_provider == "claude":
             import anthropic

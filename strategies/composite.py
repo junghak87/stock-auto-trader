@@ -1,7 +1,7 @@
 """복합 전략 모듈.
 
 여러 개별 전략의 시그널을 종합하여 최종 매매 결정을 내린다.
-과반수 투표 + 가중 평균 강도 방식으로 시그널을 합산한다.
+가중 투표 방식: 기술적 지표 전략 + 볼린저/ATR + AI(거부권 보유).
 """
 
 import logging
@@ -12,46 +12,59 @@ from .base import BaseStrategy, Signal, StrategyResult
 
 logger = logging.getLogger(__name__)
 
+# 전략별 가중치 — AI가 가장 높은 비중
+STRATEGY_WEIGHTS = {
+    "MA_Cross": 1.0,
+    "RSI": 1.0,
+    "MACD": 1.0,
+    "BB_ATR": 1.5,      # 볼린저+ATR은 높은 비중
+    "AI": 2.0,           # AI는 2배 가중치
+}
+DEFAULT_WEIGHT = 1.0
+
 
 class CompositeStrategy(BaseStrategy):
-    """복합 전략: 여러 전략을 결합하여 시그널을 생성한다."""
+    """복합 전략: 여러 전략을 가중 투표로 결합하고 AI가 거부권을 행사한다."""
 
     name = "Composite"
 
     def __init__(
         self,
         strategies: list[BaseStrategy] | None = None,
-        min_agreement: float = 0.5,
+        min_score: float = 0.4,
         ai_config: dict | None = None,
     ):
         """
         Args:
             strategies: 개별 전략 리스트
-            min_agreement: 최소 합의 비율 (0.5 = 과반수)
+            min_score: 최소 가중 점수 비율 (0.4 = 40% 이상 동의)
             ai_config: AI 전략 설정 {"provider", "api_key", "model"} (None이면 비활성)
         """
         from .ma_cross import MACrossStrategy
         from .rsi_strategy import RSIStrategy
         from .macd_strategy import MACDStrategy
+        from .bollinger_atr import BollingerATRStrategy
 
         base_strategies: list[BaseStrategy] = strategies or [
             MACrossStrategy(),
             RSIStrategy(),
             MACDStrategy(),
+            BollingerATRStrategy(),
         ]
 
+        self._ai_strategy = None
         if ai_config:
             from .ai_strategy import AIStrategy
-            ai_strategy = AIStrategy(
+            self._ai_strategy = AIStrategy(
                 provider=ai_config["provider"],
                 api_key=ai_config["api_key"],
                 model=ai_config.get("model", ""),
             )
-            base_strategies.append(ai_strategy)
-            logger.info("AI 전략 활성화 (provider: %s, model: %s)", ai_config["provider"], ai_strategy.model)
+            base_strategies.append(self._ai_strategy)
+            logger.info("AI 전략 활성화 (provider: %s, model: %s)", ai_config["provider"], self._ai_strategy.model)
 
         self.strategies = base_strategies
-        self.min_agreement = min_agreement
+        self.min_score = min_score
 
     def analyze(self, df: pd.DataFrame) -> StrategyResult:
         results: list[StrategyResult] = []
@@ -71,13 +84,66 @@ class CompositeStrategy(BaseStrategy):
                 detail="모든 전략 분석 실패",
             )
 
-        # 시그널별 집계 (HOLD는 무시)
-        buy_results = [r for r in results if r.signal == Signal.BUY and r.strength > 0.1]
-        sell_results = [r for r in results if r.signal == Signal.SELL and r.strength > 0.1]
-        total_active = len(buy_results) + len(sell_results)
+        # AI 결과 분리
+        ai_result = next((r for r in results if r.strategy_name == "AI"), None)
 
-        if total_active == 0:
-            details = " | ".join(f"{r.strategy_name}: {r.detail}" for r in results)
+        # 가중 점수 계산
+        total_weight = sum(STRATEGY_WEIGHTS.get(r.strategy_name, DEFAULT_WEIGHT) for r in results)
+        buy_score = 0.0
+        sell_score = 0.0
+
+        for r in results:
+            weight = STRATEGY_WEIGHTS.get(r.strategy_name, DEFAULT_WEIGHT)
+            if r.signal == Signal.BUY and r.strength > 0.1:
+                buy_score += weight * r.strength
+            elif r.signal == Signal.SELL and r.strength > 0.1:
+                sell_score += weight * r.strength
+
+        # 정규화 (0~1)
+        max_possible = total_weight  # 모든 전략이 강도 1.0일 때
+        buy_ratio = buy_score / max_possible if max_possible > 0 else 0
+        sell_ratio = sell_score / max_possible if max_possible > 0 else 0
+
+        details_parts = [f"{r.strategy_name}:{r.signal.value}({r.strength:.1f})" for r in results]
+        details = " | ".join(details_parts)
+
+        # AI 거부권 체크: 기술지표가 매수인데 AI가 매도면 → HOLD
+        if ai_result and ai_result.strength >= 0.5:
+            if buy_ratio >= self.min_score and ai_result.signal == Signal.SELL:
+                logger.info("AI 거부권 발동: 기술지표 매수 vs AI 매도 → HOLD")
+                return StrategyResult(
+                    signal=Signal.HOLD,
+                    strength=0,
+                    strategy_name=self.name,
+                    detail=f"AI 거부권 (기술지표 매수 but AI 매도) [{details}]",
+                )
+            if sell_ratio >= self.min_score and ai_result.signal == Signal.BUY:
+                logger.info("AI 거부권 발동: 기술지표 매도 vs AI 매수 → HOLD")
+                return StrategyResult(
+                    signal=Signal.HOLD,
+                    strength=0,
+                    strategy_name=self.name,
+                    detail=f"AI 거부권 (기술지표 매도 but AI 매수) [{details}]",
+                )
+
+        # 가중 점수 기반 시그널 결정
+        if buy_ratio >= self.min_score:
+            return StrategyResult(
+                signal=Signal.BUY,
+                strength=min(1.0, buy_ratio),
+                strategy_name=self.name,
+                detail=f"매수 (가중점수: {buy_ratio:.2f}) [{details}]",
+            )
+
+        if sell_ratio >= self.min_score:
+            return StrategyResult(
+                signal=Signal.SELL,
+                strength=min(1.0, sell_ratio),
+                strategy_name=self.name,
+                detail=f"매도 (가중점수: {sell_ratio:.2f}) [{details}]",
+            )
+
+        if buy_score == 0 and sell_score == 0:
             return StrategyResult(
                 signal=Signal.HOLD,
                 strength=0,
@@ -85,35 +151,9 @@ class CompositeStrategy(BaseStrategy):
                 detail=f"활성 시그널 없음 [{details}]",
             )
 
-        # 과반수 합의 확인
-        total_strategies = len(results)
-        buy_ratio = len(buy_results) / total_strategies
-        sell_ratio = len(sell_results) / total_strategies
-
-        details_parts = [f"{r.strategy_name}:{r.signal.value}({r.strength:.1f})" for r in results]
-        details = " | ".join(details_parts)
-
-        if buy_ratio >= self.min_agreement:
-            avg_strength = sum(r.strength for r in buy_results) / len(buy_results)
-            return StrategyResult(
-                signal=Signal.BUY,
-                strength=avg_strength,
-                strategy_name=self.name,
-                detail=f"매수 합의 ({len(buy_results)}/{total_strategies}) [{details}]",
-            )
-
-        if sell_ratio >= self.min_agreement:
-            avg_strength = sum(r.strength for r in sell_results) / len(sell_results)
-            return StrategyResult(
-                signal=Signal.SELL,
-                strength=avg_strength,
-                strategy_name=self.name,
-                detail=f"매도 합의 ({len(sell_results)}/{total_strategies}) [{details}]",
-            )
-
         return StrategyResult(
             signal=Signal.HOLD,
             strength=0,
             strategy_name=self.name,
-            detail=f"합의 부족 (매수:{len(buy_results)} 매도:{len(sell_results)}/{total_strategies}) [{details}]",
+            detail=f"점수 부족 (매수:{buy_ratio:.2f} 매도:{sell_ratio:.2f}) [{details}]",
         )

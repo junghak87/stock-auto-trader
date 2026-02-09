@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import io
 import logging
 import signal
 import sys
@@ -37,7 +38,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout),
+        logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")),
         logging.FileHandler("trading.log", encoding="utf-8"),
     ],
 )

@@ -22,15 +22,23 @@ DEFAULT_MODELS = {
 }
 
 # ── 시스템 프롬프트 ───────────────────────────────────────
-SYSTEM_PROMPT = """당신은 전문 주식 기술적 분석가입니다.
-주어진 시세 데이터와 기술적 지표를 분석하여 매매 판단을 내려주세요.
+SYSTEM_PROMPT = """당신은 전문 주식 기술적 분석가이자 리스크 관리 전문가입니다.
+주어진 시세 데이터와 기술적 지표를 종합 분석하여 매매 판단을 내려주세요.
+
+당신의 역할:
+- 다른 기술적 전략(MA Cross, RSI, MACD, 볼린저밴드)과 함께 투표에 참여합니다
+- 당신의 판단은 다른 전략보다 2배 가중치를 가집니다
+- 확신이 0.5 이상이면 다른 전략의 시그널을 거부(VETO)할 수 있습니다
+- 따라서 시장 상황이 위험하다면 HOLD를 강하게 추천하세요
 
 분석 시 고려사항:
 - 이동평균(MA5, MA20) 배열과 교차 여부
 - RSI 과매수/과매도 구간
 - MACD 히스토그램 방향과 교차
-- 거래량 변화 추세
-- 최근 가격 패턴 (지지/저항, 추세)
+- 볼린저밴드 내 가격 위치와 밴드폭 변화
+- ATR(변동성) 수준과 추세
+- 거래량 변화 추세와 이상 급변
+- 최근 가격 패턴 (지지/저항, 추세, 캔들 패턴)
 
 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트는 포함하지 마세요:
 {"signal": "BUY 또는 SELL 또는 HOLD", "strength": 0.0에서 1.0 사이 숫자, "reason": "판단 근거 요약"}
@@ -38,7 +46,7 @@ SYSTEM_PROMPT = """당신은 전문 주식 기술적 분석가입니다.
 strength 기준:
 - 0.0~0.3: 약한 시그널 (확신 낮음)
 - 0.3~0.6: 중간 시그널
-- 0.6~1.0: 강한 시그널 (확신 높음)"""
+- 0.6~1.0: 강한 시그널 (확신 높음, 거부권 발동 가능)"""
 
 
 class AIStrategy(BaseStrategy):
@@ -88,21 +96,36 @@ class AIStrategy(BaseStrategy):
         df["macd_signal"] = macd.macd_signal()
         df["macd_hist"] = macd.macd_diff()
 
+        # 볼린저밴드
+        bb = ta.volatility.BollingerBands(close=df["close"], window=20, window_dev=2)
+        df["bb_upper"] = bb.bollinger_hband()
+        df["bb_lower"] = bb.bollinger_lband()
+
+        # ATR (변동성)
+        atr = ta.volatility.AverageTrueRange(
+            high=df["high"], low=df["low"], close=df["close"], window=14,
+        )
+        df["atr"] = atr.average_true_range()
+        df["atr_pct"] = df["atr"] / df["close"] * 100
+
+        # 거래량 이동평균
+        df["vol_ma20"] = df["volume"].rolling(window=20).mean()
+
         # 최근 10일 데이터 추출
         recent = df.tail(10).copy()
 
         lines = ["[최근 10일 시세 및 기술적 지표]"]
-        lines.append("날짜 | 시가 | 고가 | 저가 | 종가 | 거래량 | MA5 | MA20 | RSI | MACD | Signal | Hist")
-        lines.append("-" * 100)
+        lines.append("날짜 | 종가 | 거래량 | MA5 | MA20 | RSI | MACD_Hist | BB상단 | BB하단 | ATR%")
+        lines.append("-" * 110)
 
         for _, row in recent.iterrows():
             lines.append(
                 f"{row['date']} | "
-                f"{row['open']:,.0f} | {row['high']:,.0f} | {row['low']:,.0f} | {row['close']:,.0f} | "
-                f"{row['volume']:,} | "
+                f"{row['close']:,.0f} | {row['volume']:,} | "
                 f"{row['ma5']:,.0f} | {row['ma20']:,.0f} | "
-                f"{row['rsi']:.1f} | "
-                f"{row['macd']:.2f} | {row['macd_signal']:.2f} | {row['macd_hist']:.2f}"
+                f"{row['rsi']:.1f} | {row['macd_hist']:.2f} | "
+                f"{row['bb_upper']:,.0f} | {row['bb_lower']:,.0f} | "
+                f"{row['atr_pct']:.2f}%"
             )
 
         # 추세 요약
@@ -110,13 +133,20 @@ class AIStrategy(BaseStrategy):
         prev = recent.iloc[-2]
         price_change = (latest["close"] - prev["close"]) / prev["close"] * 100
         vol_change = (latest["volume"] - prev["volume"]) / prev["volume"] * 100 if prev["volume"] > 0 else 0
+        vol_ratio = latest["volume"] / latest["vol_ma20"] if latest["vol_ma20"] > 0 else 1.0
+
+        # 볼린저밴드 내 위치 (0=하단, 1=상단)
+        bb_range = latest["bb_upper"] - latest["bb_lower"]
+        bb_position = (latest["close"] - latest["bb_lower"]) / bb_range if bb_range > 0 else 0.5
 
         lines.append(f"\n[현재 상태 요약]")
         lines.append(f"최신 종가: {latest['close']:,.0f} (전일 대비 {price_change:+.2f}%)")
-        lines.append(f"거래량 변화: {vol_change:+.1f}%")
+        lines.append(f"거래량: 20일 평균 대비 {vol_ratio:.1f}배 (변화: {vol_change:+.1f}%)")
         lines.append(f"MA5 vs MA20: {'MA5 > MA20 (상승 배열)' if latest['ma5'] > latest['ma20'] else 'MA5 < MA20 (하락 배열)'}")
         lines.append(f"RSI: {latest['rsi']:.1f} ({'과매수' if latest['rsi'] > 70 else '과매도' if latest['rsi'] < 30 else '중립'})")
         lines.append(f"MACD Histogram: {latest['macd_hist']:.2f} ({'상승' if latest['macd_hist'] > 0 else '하락'} 모멘텀)")
+        lines.append(f"볼린저밴드 위치: {bb_position:.2f} (0=하단, 0.5=중심, 1=상단)")
+        lines.append(f"ATR 변동성: {latest['atr_pct']:.2f}% ({'고변동' if latest['atr_pct'] > 3 else '저변동' if latest['atr_pct'] < 1 else '보통'})")
 
         lines.append("\n이 데이터를 기반으로 매매 판단을 내려주세요.")
 
@@ -137,14 +167,18 @@ class AIStrategy(BaseStrategy):
 
     def _call_gemini(self, prompt: str) -> str:
         """Google Gemini API를 호출한다."""
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
 
-        genai.configure(api_key=self.api_key)
-        model = genai.GenerativeModel(
-            model_name=self.model,
-            system_instruction=SYSTEM_PROMPT,
+        client = genai.Client(api_key=self.api_key)
+        response = client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                max_output_tokens=512,
+            ),
         )
-        response = model.generate_content(prompt)
         return response.text
 
     def _call_claude(self, prompt: str) -> str:

@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import threading
 from datetime import datetime
 
 from telegram import Bot, Update
@@ -25,6 +26,10 @@ class TelegramNotifier:
         self._app: Application | None = None
         self._kis_client = None
         self._database = None
+        # 전용 event loop (동기 전송용)
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._loop_thread.start()
 
     def set_dependencies(self, kis_client, database):
         """런타임 의존성 주입 (순환 참조 방지)."""
@@ -54,11 +59,11 @@ class TelegramNotifier:
 
     def send(self, text: str):
         """동기 방식 메시지 전송 (스케줄러에서 호출용)."""
+        future = asyncio.run_coroutine_threadsafe(self._send(text), self._loop)
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._send(text))
-        except RuntimeError:
-            asyncio.run(self._send(text))
+            future.result(timeout=10)
+        except Exception as e:
+            logger.error("텔레그램 전송 타임아웃/에러: %s", e)
 
     # ── 알림 유형별 전송 ──────────────────────────────────
 

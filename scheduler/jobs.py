@@ -95,6 +95,9 @@ class TradingJobs:
                 df = self.strategy.ohlcv_to_dataframe(ohlcv)
                 result = self.strategy.analyze(df)
 
+                # ATR 기반 동적 손절/익절 업데이트
+                self.risk.update_dynamic_thresholds(symbol, df)
+
                 logger.info("[%s] 시그널: %s (강도: %.2f) — %s", symbol, result.signal.value, result.strength, result.detail)
 
                 # 시그널이 있으면 주문 실행
@@ -161,6 +164,9 @@ class TradingJobs:
 
                 df = self.strategy.ohlcv_to_dataframe(ohlcv)
                 result = self.strategy.analyze(df)
+
+                # ATR 기반 동적 손절/익절 업데이트
+                self.risk.update_dynamic_thresholds(symbol, df)
 
                 logger.info("[%s] 시그널: %s (강도: %.2f) — %s", symbol, result.signal.value, result.strength, result.detail)
 
