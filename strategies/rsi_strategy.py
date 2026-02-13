@@ -73,6 +73,24 @@ class RSIStrategy(BaseStrategy):
                 detail=f"RSI 과매수 구간 (RSI={current_rsi:.1f})",
             )
 
+        # 과매도 접근 (30~40) → 약한 매수
+        if current_rsi < 40 and current_rsi < prev_rsi:
+            return StrategyResult(
+                signal=Signal.BUY,
+                strength=0.2,
+                strategy_name=self.name,
+                detail=f"RSI 과매도 접근 (RSI={current_rsi:.1f}, 하락 중)",
+            )
+
+        # 과매수 접근 (60~70) → 약한 매도
+        if current_rsi > 60 and current_rsi > prev_rsi:
+            return StrategyResult(
+                signal=Signal.SELL,
+                strength=0.2,
+                strategy_name=self.name,
+                detail=f"RSI 과매수 접근 (RSI={current_rsi:.1f}, 상승 중)",
+            )
+
         return StrategyResult(
             signal=Signal.HOLD,
             strength=0,

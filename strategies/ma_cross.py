@@ -56,12 +56,30 @@ class MACrossStrategy(BaseStrategy):
                 detail=f"데드크로스 (MA{self.short_window}={curr_short:.0f} < MA{self.long_window}={curr_long:.0f}, 괴리: {gap_pct:.2f}%)",
             )
 
-        # 추세 유지
-        if curr_short > curr_long:
-            trend = "상승 추세 유지"
-        else:
-            trend = "하락 추세 유지"
+        # 추세 유지 중 — 괴리 확대 시 추세 방향 시그널
+        gap_pct = abs(curr_short - curr_long) / curr_long * 100
+        prev_gap = abs(prev_short - prev_long) / prev_long * 100
+        widening = gap_pct > prev_gap  # 괴리 확대 중
 
+        if curr_short > curr_long and widening:
+            strength = min(gap_pct / 3, 0.5)
+            return StrategyResult(
+                signal=Signal.BUY,
+                strength=max(0.2, strength),
+                strategy_name=self.name,
+                detail=f"상승 추세 강화 (괴리: {gap_pct:.2f}%, MA{self.short_window}={curr_short:.0f})",
+            )
+
+        if curr_short < curr_long and widening:
+            strength = min(gap_pct / 3, 0.5)
+            return StrategyResult(
+                signal=Signal.SELL,
+                strength=max(0.2, strength),
+                strategy_name=self.name,
+                detail=f"하락 추세 강화 (괴리: {gap_pct:.2f}%, MA{self.short_window}={curr_short:.0f})",
+            )
+
+        trend = "상승 추세 유지" if curr_short > curr_long else "하락 추세 유지"
         return StrategyResult(
             signal=Signal.HOLD,
             strength=0,

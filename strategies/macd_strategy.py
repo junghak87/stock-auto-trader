@@ -68,22 +68,24 @@ class MACDStrategy(BaseStrategy):
                 detail=f"MACD 데드크로스 (MACD={curr_macd:.2f}, Signal={curr_signal:.2f}, Hist={curr_hist:.2f})",
             )
 
-        # 히스토그램 증가 추세 (상승 모멘텀)
+        # 히스토그램 증가 추세 (상승 모멘텀 강화)
         if curr_hist > 0 and curr_hist > prev_hist:
+            strength = min(abs(curr_hist - prev_hist) / (abs(curr_signal) + 1e-10), 0.5)
             return StrategyResult(
-                signal=Signal.HOLD,
-                strength=0,
+                signal=Signal.BUY,
+                strength=max(0.2, strength),
                 strategy_name=self.name,
-                detail=f"상승 모멘텀 지속 (Hist={curr_hist:.2f})",
+                detail=f"상승 모멘텀 강화 (Hist={curr_hist:.2f}, 변화={curr_hist - prev_hist:+.2f})",
             )
 
-        # 히스토그램 감소 추세 (하락 모멘텀)
+        # 히스토그램 감소 추세 (하락 모멘텀 강화)
         if curr_hist < 0 and curr_hist < prev_hist:
+            strength = min(abs(curr_hist - prev_hist) / (abs(curr_signal) + 1e-10), 0.5)
             return StrategyResult(
-                signal=Signal.HOLD,
-                strength=0,
+                signal=Signal.SELL,
+                strength=max(0.2, strength),
                 strategy_name=self.name,
-                detail=f"하락 모멘텀 지속 (Hist={curr_hist:.2f})",
+                detail=f"하락 모멘텀 강화 (Hist={curr_hist:.2f}, 변화={curr_hist - prev_hist:+.2f})",
             )
 
         return StrategyResult(

@@ -87,25 +87,30 @@ class CompositeStrategy(BaseStrategy):
         # AI 결과 분리
         ai_result = next((r for r in results if r.strategy_name == "AI"), None)
 
-        # 가중 점수 계산
-        total_weight = sum(STRATEGY_WEIGHTS.get(r.strategy_name, DEFAULT_WEIGHT) for r in results)
+        # 가중 점수 계산 — 활성 투표자(BUY/SELL) 기준
         buy_score = 0.0
         sell_score = 0.0
+        active_weight = 0.0  # 시그널을 낸 전략의 가중치 합
 
         for r in results:
             weight = STRATEGY_WEIGHTS.get(r.strategy_name, DEFAULT_WEIGHT)
             if r.signal == Signal.BUY and r.strength > 0.1:
                 buy_score += weight * r.strength
+                active_weight += weight
             elif r.signal == Signal.SELL and r.strength > 0.1:
                 sell_score += weight * r.strength
+                active_weight += weight
 
-        # 정규화 (0~1)
-        max_possible = total_weight  # 모든 전략이 강도 1.0일 때
-        buy_ratio = buy_score / max_possible if max_possible > 0 else 0
-        sell_ratio = sell_score / max_possible if max_possible > 0 else 0
+        # 정규화: 활성 투표자 가중치 기준 (HOLD 전략은 분모에서 제외)
+        buy_ratio = buy_score / active_weight if active_weight > 0 else 0
+        sell_ratio = sell_score / active_weight if active_weight > 0 else 0
 
         details_parts = [f"{r.strategy_name}:{r.signal.value}({r.strength:.1f})" for r in results]
         details = " | ".join(details_parts)
+
+        # 활성 투표자 수 (최소 2개 전략이 같은 방향이어야 시그널)
+        buy_voters = sum(1 for r in results if r.signal == Signal.BUY and r.strength > 0.1)
+        sell_voters = sum(1 for r in results if r.signal == Signal.SELL and r.strength > 0.1)
 
         # AI 거부권 체크: 기술지표가 매수인데 AI가 매도면 → HOLD
         if ai_result and ai_result.strength >= 0.5:
@@ -126,21 +131,21 @@ class CompositeStrategy(BaseStrategy):
                     detail=f"AI 거부권 (기술지표 매도 but AI 매수) [{details}]",
                 )
 
-        # 가중 점수 기반 시그널 결정
-        if buy_ratio >= self.min_score:
+        # 가중 점수 기반 시그널 결정 (최소 2개 전략 동의 필요)
+        if buy_ratio >= self.min_score and buy_voters >= 2:
             return StrategyResult(
                 signal=Signal.BUY,
                 strength=min(1.0, buy_ratio),
                 strategy_name=self.name,
-                detail=f"매수 (가중점수: {buy_ratio:.2f}) [{details}]",
+                detail=f"매수 (점수: {buy_ratio:.2f}, {buy_voters}개 전략 동의) [{details}]",
             )
 
-        if sell_ratio >= self.min_score:
+        if sell_ratio >= self.min_score and sell_voters >= 2:
             return StrategyResult(
                 signal=Signal.SELL,
                 strength=min(1.0, sell_ratio),
                 strategy_name=self.name,
-                detail=f"매도 (가중점수: {sell_ratio:.2f}) [{details}]",
+                detail=f"매도 (점수: {sell_ratio:.2f}, {sell_voters}개 전략 동의) [{details}]",
             )
 
         if buy_score == 0 and sell_score == 0:
@@ -155,5 +160,5 @@ class CompositeStrategy(BaseStrategy):
             signal=Signal.HOLD,
             strength=0,
             strategy_name=self.name,
-            detail=f"점수 부족 (매수:{buy_ratio:.2f} 매도:{sell_ratio:.2f}) [{details}]",
+            detail=f"조건 미달 (매수:{buy_ratio:.2f}/{buy_voters}표 매도:{sell_ratio:.2f}/{sell_voters}표) [{details}]",
         )
