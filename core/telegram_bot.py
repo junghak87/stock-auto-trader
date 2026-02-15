@@ -265,6 +265,32 @@ class TelegramNotifier:
         msg += f"\n총 {len(items)}개 종목 감시 중"
         await update.message.reply_html(msg)
 
+    async def _cmd_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """전략별 성과를 조회한다."""
+        if not self._is_authorized(update):
+            return
+        if not self._database:
+            await update.message.reply_text("시스템이 초기화되지 않았습니다.")
+            return
+
+        stats = self._database.calculate_strategy_performance()
+        if not stats:
+            await update.message.reply_text("아직 매매 기록이 없습니다.")
+            return
+
+        msg = "📊 <b>전략별 성과 (30일)</b>\n\n"
+        for s in stats:
+            pnl_sign = "+" if s["total_pnl"] >= 0 else ""
+            pnl_emoji = "🟢" if s["total_pnl"] >= 0 else "🔴"
+            win_rate = f"{s['win_rate']:.0f}%" if s["trade_count"] > 0 else "-"
+            msg += (
+                f"{pnl_emoji} <b>{s['strategy']}</b>\n"
+                f"  거래: {s['trade_count']}건 | 승률: {win_rate}\n"
+                f"  손익: {pnl_sign}{s['total_pnl']:,.0f}\n"
+                f"  평균수익: +{s['avg_profit']:,.0f} | 평균손실: {s['avg_loss']:,.0f}\n\n"
+            )
+        await update.message.reply_html(msg)
+
     def setup_bot_commands(self, app: Application):
         """텔레그램 봇 명령어를 등록한다."""
         app.add_handler(CommandHandler("status", self._cmd_status))
@@ -273,6 +299,7 @@ class TelegramNotifier:
         app.add_handler(CommandHandler("add", self._cmd_add))
         app.add_handler(CommandHandler("remove", self._cmd_remove))
         app.add_handler(CommandHandler("watchlist", self._cmd_watchlist))
+        app.add_handler(CommandHandler("performance", self._cmd_performance))
         self._app = app
 
     async def start_bot_polling(self):

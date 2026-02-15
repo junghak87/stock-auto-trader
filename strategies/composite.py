@@ -66,6 +66,11 @@ class CompositeStrategy(BaseStrategy):
         self.strategies = base_strategies
         self.min_score = min_score
 
+    def set_market_context(self, context: str):
+        """AI 전략에 시장 컨텍스트를 전달한다."""
+        if self._ai_strategy:
+            self._ai_strategy.set_market_context(context)
+
     def analyze(self, df: pd.DataFrame) -> StrategyResult:
         results: list[StrategyResult] = []
         for strategy in self.strategies:
@@ -130,6 +135,16 @@ class CompositeStrategy(BaseStrategy):
                     strategy_name=self.name,
                     detail=f"AI 거부권 (기술지표 매도 but AI 매수) [{details}]",
                 )
+
+        # AI 단독 매매: AI 확신도 >= 0.8이면 다른 전략 동의 없이 시그널 발생
+        if ai_result and ai_result.signal != Signal.HOLD and ai_result.strength >= 0.8:
+            logger.info("AI 단독 매매: %s (강도: %.2f)", ai_result.signal.value, ai_result.strength)
+            return StrategyResult(
+                signal=ai_result.signal,
+                strength=ai_result.strength,
+                strategy_name=self.name,
+                detail=f"AI 단독 {ai_result.signal.value} (강도: {ai_result.strength:.2f}) [{details}]",
+            )
 
         # 가중 점수 기반 시그널 결정 (최소 2개 전략 동의 필요)
         if buy_ratio >= self.min_score and buy_voters >= 2:

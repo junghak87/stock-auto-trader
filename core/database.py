@@ -94,6 +94,21 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_market_data_symbol ON market_data(symbol, date);
                 CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol, timestamp);
                 CREATE INDEX IF NOT EXISTS idx_watchlist_active ON watchlist(active, market);
+
+                CREATE TABLE IF NOT EXISTS strategy_performance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    trade_count INTEGER DEFAULT 0,
+                    win_count INTEGER DEFAULT 0,
+                    loss_count INTEGER DEFAULT 0,
+                    total_pnl REAL DEFAULT 0,
+                    avg_profit REAL DEFAULT 0,
+                    avg_loss REAL DEFAULT 0,
+                    UNIQUE(date, strategy)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_strategy_perf ON strategy_performance(date, strategy);
             """)
 
     # ── 매매 기록 ─────────────────────────────────────────
@@ -231,6 +246,105 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── 전략 성과 ───────────────────────────────────────
+
+    def calculate_strategy_performance(self, days: int = 30) -> list[dict]:
+        """trades 테이블에서 buy-sell FIFO 매칭으로 전략별 PnL을 계산한다."""
+        from collections import defaultdict
+        from datetime import timedelta
+
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE success=1 AND timestamp >= ? ORDER BY timestamp ASC",
+                (cutoff,),
+            ).fetchall()
+
+        trades = [dict(r) for r in rows]
+        buys_by_symbol: dict[str, list[dict]] = defaultdict(list)
+        strategy_stats: dict[str, dict] = defaultdict(
+            lambda: {"wins": 0, "losses": 0, "profits": [], "losses_list": [], "total_pnl": 0.0}
+        )
+
+        for t in trades:
+            if t["side"] == "buy":
+                buys_by_symbol[t["symbol"]].append(t)
+            elif t["side"] == "sell" and buys_by_symbol[t["symbol"]]:
+                buy = buys_by_symbol[t["symbol"]].pop(0)
+                if buy["price"] <= 0 or t["price"] <= 0:
+                    continue
+                matched_qty = min(buy["qty"], t["qty"])
+                pnl = (t["price"] - buy["price"]) * matched_qty
+                strategy = buy["strategy"] or "unknown"
+                stats = strategy_stats[strategy]
+                stats["total_pnl"] += pnl
+                if pnl >= 0:
+                    stats["wins"] += 1
+                    stats["profits"].append(pnl)
+                else:
+                    stats["losses"] += 1
+                    stats["losses_list"].append(pnl)
+
+        results = []
+        for strategy, stats in strategy_stats.items():
+            total = stats["wins"] + stats["losses"]
+            results.append({
+                "strategy": strategy,
+                "trade_count": total,
+                "win_count": stats["wins"],
+                "loss_count": stats["losses"],
+                "win_rate": stats["wins"] / total * 100 if total > 0 else 0,
+                "total_pnl": stats["total_pnl"],
+                "avg_profit": sum(stats["profits"]) / len(stats["profits"]) if stats["profits"] else 0,
+                "avg_loss": sum(stats["losses_list"]) / len(stats["losses_list"]) if stats["losses_list"] else 0,
+            })
+        return sorted(results, key=lambda x: x["total_pnl"], reverse=True)
+
+    def save_strategy_performance(self, date: str, strategy: str, stats: dict):
+        """일별 전략 성과를 저장한다."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO strategy_performance
+                   (date, strategy, trade_count, win_count, loss_count, total_pnl, avg_profit, avg_loss)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (date, strategy, stats.get("trade_count", 0), stats.get("win_count", 0),
+                 stats.get("loss_count", 0), stats.get("total_pnl", 0),
+                 stats.get("avg_profit", 0), stats.get("avg_loss", 0)),
+            )
+
+    def get_strategy_summary(self, days: int = 30) -> list[dict]:
+        """최근 N일간 전략별 집계 성과를 조회한다."""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT strategy,
+                          SUM(trade_count) as trade_count,
+                          SUM(win_count) as win_count,
+                          SUM(loss_count) as loss_count,
+                          SUM(total_pnl) as total_pnl
+                   FROM strategy_performance
+                   WHERE date >= ?
+                   GROUP BY strategy
+                   ORDER BY total_pnl DESC""",
+                (cutoff,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── 데이터 정리 ──────────────────────────────────────
+
+    def cleanup_old_data(self, retention_days: int = 90):
+        """오래된 데이터를 삭제한다."""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            r1 = conn.execute("DELETE FROM market_data WHERE timestamp < ?", (cutoff,))
+            r2 = conn.execute("DELETE FROM signals WHERE timestamp < ?", (cutoff,))
+            r3 = conn.execute("DELETE FROM trades WHERE timestamp < ? AND success = 0", (cutoff,))
+        total = r1.rowcount + r2.rowcount + r3.rowcount
+        if total > 0:
+            logger.info("DB 정리: %d건 삭제 (%d일 이전 데이터)", total, retention_days)
+
     # ── 감시 종목 (Watchlist) ─────────────────────────────
 
     def add_watchlist(self, symbol: str, market: str, name: str = "", source: str = "manual", reason: str = "") -> bool:
@@ -281,13 +395,71 @@ class Database:
         items = self.get_watchlist(market)
         return [item["symbol"] for item in items]
 
-    def init_watchlist_from_config(self, kr_stocks: list[str], us_stocks: list[str]):
-        """설정 파일의 종목을 watchlist에 시드로 추가한다 (최초 실행 시)."""
-        existing = self.get_watchlist()
-        if existing:
-            return  # 이미 종목이 있으면 시드 추가 안 함
+    def clear_ai_watchlist(self, market: str | None = None):
+        """AI 스캔으로 추가된 감시 종목을 비활성화한다 (매일 갱신용)."""
+        with self._connect() as conn:
+            if market:
+                cursor = conn.execute(
+                    "UPDATE watchlist SET active=0 WHERE source='ai_scan' AND market=?",
+                    (market,),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE watchlist SET active=0 WHERE source='ai_scan'",
+                )
+        count = cursor.rowcount
+        if count > 0:
+            logger.info("AI 스캔 종목 초기화: %d개 비활성화 (market=%s)", count, market or "ALL")
+
+    def sync_watchlist_from_config(self, kr_stocks: list[str], us_stocks: list[str]):
+        """설정 파일의 종목을 watchlist와 동기화한다.
+
+        - .env에 있는 종목: 활성화 (없으면 추가)
+        - .env에서 제거된 config 종목: 비활성화
+        """
+        config_kr = set(kr_stocks)
+        config_us = set(us_stocks)
+
+        # 현재 config 소스 종목 조회
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol, market FROM watchlist WHERE source='config'",
+            ).fetchall()
+        existing_config = {(r["symbol"], r["market"]) for r in rows}
+
+        # .env에 있는 종목 활성화/추가
+        added = 0
         for symbol in kr_stocks:
-            self.add_watchlist(symbol, "KR", source="config")
+            if (symbol, "KR") not in existing_config:
+                self.add_watchlist(symbol, "KR", source="config")
+                added += 1
+            else:
+                # 이미 있으면 활성화만
+                with self._connect() as conn:
+                    conn.execute(
+                        "UPDATE watchlist SET active=1 WHERE symbol=? AND market=? AND source='config'",
+                        (symbol, "KR"),
+                    )
         for symbol in us_stocks:
-            self.add_watchlist(symbol, "US", source="config")
-        logger.info("설정 파일에서 감시 종목 시드 완료: KR=%d, US=%d", len(kr_stocks), len(us_stocks))
+            if (symbol, "US") not in existing_config:
+                self.add_watchlist(symbol, "US", source="config")
+                added += 1
+            else:
+                with self._connect() as conn:
+                    conn.execute(
+                        "UPDATE watchlist SET active=1 WHERE symbol=? AND market=? AND source='config'",
+                        (symbol, "US"),
+                    )
+
+        # .env에서 제거된 config 종목 비활성화
+        removed = 0
+        for symbol, market in existing_config:
+            if market == "KR" and symbol not in config_kr:
+                self.remove_watchlist(symbol, market)
+                removed += 1
+            elif market == "US" and symbol not in config_us:
+                self.remove_watchlist(symbol, market)
+                removed += 1
+
+        if added or removed:
+            logger.info("config 종목 동기화: %d개 추가, %d개 제거", added, removed)

@@ -28,6 +28,7 @@ from core.database import Database
 from core.telegram_bot import TelegramNotifier
 from strategies.composite import CompositeStrategy
 from strategies.stock_scanner import StockScanner
+from strategies.tail_trading import TailTradingStrategy
 from trading.executor import TradingExecutor
 from trading.risk_manager import RiskManager
 from scheduler.jobs import TradingJobs
@@ -92,7 +93,14 @@ def build_components(is_live: bool) -> dict:
         max_position_ratio=settings.trading.max_position_ratio,
         stop_loss_pct=settings.trading.stop_loss_pct,
         take_profit_pct=settings.trading.take_profit_pct,
+        trailing_activation_pct=settings.trading.trailing_activation_pct,
+        trailing_stop_pct=settings.trading.trailing_stop_pct,
+        daily_max_loss_pct=settings.trading.daily_max_loss_pct,
+        consecutive_loss_limit=settings.trading.consecutive_loss_limit,
+        consecutive_loss_cooldown=settings.trading.consecutive_loss_cooldown,
         max_daily_trades=settings.trading.max_daily_trades,
+        total_budget=settings.trading.total_budget,
+        usd_krw_rate=settings.trading.usd_krw_rate,
     )
 
     # 주문 실행기
@@ -102,9 +110,20 @@ def build_components(is_live: bool) -> dict:
         notifier=notifier,
         risk_manager=risk_manager,
     )
+    # 지정가 주문 설정
+    executor.limit_order_enabled = settings.trading.limit_order_enabled
+    executor.limit_buy_offset_pct = settings.trading.limit_buy_offset_pct
+    executor.limit_tp_offset_pct = settings.trading.limit_tp_offset_pct
+    executor.limit_order_timeout_sec = settings.trading.limit_order_timeout_sec
+    # 분할 매수/매도 설정
+    executor.split_buy_enabled = settings.trading.split_buy_enabled
+    executor.split_buy_first_ratio = settings.trading.split_buy_first_ratio
+    executor.split_buy_dip_pct = settings.trading.split_buy_dip_pct
+    executor.split_sell_enabled = settings.trading.split_sell_enabled
+    executor.split_sell_first_ratio = settings.trading.split_sell_first_ratio
 
-    # 감시 종목 초기화 (.env → DB 시드)
-    database.init_watchlist_from_config(
+    # 감시 종목 동기화 (.env ↔ DB)
+    database.sync_watchlist_from_config(
         settings.trading.kr_stock_list,
         settings.trading.us_stock_list,
     )
@@ -118,7 +137,11 @@ def build_components(is_live: bool) -> dict:
             ai_provider=settings.ai.provider,
             ai_api_key=settings.ai.active_api_key,
             ai_model=settings.ai.model,
+            budget_per_stock=settings.trading.budget_per_stock,
         )
+
+    # 꼬리 매매 전략 (분봉 기반, 국내만)
+    tail_strategy = TailTradingStrategy()
 
     # 스케줄 작업
     jobs = TradingJobs(
@@ -129,6 +152,7 @@ def build_components(is_live: bool) -> dict:
         risk_manager=risk_manager,
         strategy=strategy,
         scanner=scanner,
+        tail_strategy=tail_strategy,
     )
 
     return {
@@ -150,10 +174,32 @@ def setup_scheduler(jobs: TradingJobs) -> BackgroundScheduler:
     # 장 시작 준비: 08:50
     scheduler.add_job(jobs.job_kr_market_open, CronTrigger(day_of_week="mon-fri", hour=8, minute=50))
 
-    # 장중 전략 실행: 09:05 ~ 15:20 (매 5분)
+    # 장중 전략 실행: 09:00 ~ 15:00 (매 15분)
     scheduler.add_job(
         jobs.job_kr_strategy_run,
-        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/5"),
+        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="0,15,30,45"),
+    )
+
+    # 장중 손절/익절 체크: 09:05 ~ 15:25 (매 5분) — 빠른 리스크 대응
+    scheduler.add_job(
+        jobs.job_kr_risk_check,
+        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="5,10,20,25,35,40,50,55"),
+    )
+
+    # 꼬리 매매 (분봉 기반): 09:03 ~ 15:24 (매 3분)
+    scheduler.add_job(
+        jobs.job_kr_tail_trading,
+        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/3"),
+    )
+
+    # 장중 AI 추가 스캔: 11:00, 13:30 (거래량 변동이 큰 시간대)
+    scheduler.add_job(
+        jobs.job_kr_midday_scan,
+        CronTrigger(day_of_week="mon-fri", hour=11, minute=0),
+    )
+    scheduler.add_job(
+        jobs.job_kr_midday_scan,
+        CronTrigger(day_of_week="mon-fri", hour=13, minute=30),
     )
 
     # 장 마감 정산: 15:40
@@ -163,16 +209,24 @@ def setup_scheduler(jobs: TradingJobs) -> BackgroundScheduler:
     # 미국장 시작 준비: 23:20 (월~금)
     scheduler.add_job(jobs.job_us_market_open, CronTrigger(day_of_week="mon-fri", hour=23, minute=20))
 
-    # 미국장 전략 실행: 23:30~05:50 (매 10분)
-    # 야간 파트 (당일): 23:30 ~ 23:59
+    # 미국장 전략 실행: 23:30~05:45 (매 15분)
     scheduler.add_job(
         jobs.job_us_strategy_run,
-        CronTrigger(day_of_week="mon-fri", hour=23, minute="30,40,50"),
+        CronTrigger(day_of_week="mon-fri", hour=23, minute="30,45"),
     )
-    # 야간 파트 (익일): 00:00 ~ 05:50
     scheduler.add_job(
         jobs.job_us_strategy_run,
-        CronTrigger(day_of_week="tue-sat", hour="0-5", minute="*/10"),
+        CronTrigger(day_of_week="tue-sat", hour="0-5", minute="0,15,30,45"),
+    )
+
+    # 미국장 손절/익절 체크: 23:35~05:55 (매 5분) — 빠른 리스크 대응
+    scheduler.add_job(
+        jobs.job_us_risk_check,
+        CronTrigger(day_of_week="mon-fri", hour=23, minute="35,40,50,55"),
+    )
+    scheduler.add_job(
+        jobs.job_us_risk_check,
+        CronTrigger(day_of_week="tue-sat", hour="0-5", minute="5,10,20,25,35,40,50,55"),
     )
 
     # 미국장 마감: 06:10 (화~토)
@@ -190,8 +244,9 @@ def run_once(jobs: TradingJobs):
 
     # 현재 시간에 따라 국내/해외 전략 실행
     if 9 <= hour < 16:
-        logger.info("국내 장 시간 — 국내 전략 실행")
+        logger.info("국내 장 시간 — 국내 전략 + 꼬리 매매 실행")
         jobs.job_kr_strategy_run()
+        jobs.job_kr_tail_trading()
     elif hour >= 23 or hour < 6:
         logger.info("해외 장 시간 — 해외 전략 실행")
         jobs.job_us_strategy_run()
@@ -211,6 +266,13 @@ def main():
     mode_str = "실전투자" if is_live else "모의투자"
     logger.info("=" * 60)
     logger.info("한국투자증권 자동매매 시스템 시작 [%s 모드]", mode_str)
+    if settings.trading.total_budget > 0:
+        logger.info("총 투자 한도: %,.0f원 | 종목당: %,.0f원 (%.0f%%)",
+                     settings.trading.total_budget,
+                     settings.trading.budget_per_stock,
+                     settings.trading.max_position_ratio * 100)
+    else:
+        logger.info("투자 한도: 계좌 총평가액 기준 (종목당 %.0f%%)", settings.trading.max_position_ratio * 100)
     logger.info("국내 감시 종목: %s", settings.trading.kr_stock_list)
     logger.info("해외 감시 종목: %s", settings.trading.us_stock_list)
     if settings.ai.is_configured:
@@ -231,6 +293,17 @@ def main():
     if args.once:
         run_once(jobs)
         return
+
+    # 텔레그램 봇 폴링 시작 (별도 스레드)
+    import asyncio
+    bot_loop = asyncio.new_event_loop()
+
+    def _start_bot():
+        asyncio.set_event_loop(bot_loop)
+        bot_loop.run_until_complete(notifier.start_bot_polling())
+
+    bot_thread = threading.Thread(target=_start_bot, daemon=True)
+    bot_thread.start()
 
     # 스케줄러 시작
     scheduler = setup_scheduler(jobs)

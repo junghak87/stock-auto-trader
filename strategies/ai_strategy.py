@@ -45,7 +45,10 @@ strength: 0.3 미만은 사용하지 마세요. 판단했으면 최소 0.3 이�
 
 
 class AIStrategy(BaseStrategy):
-    """생성형 AI 기반 매매 전략."""
+    """생성형 AI 기반 매매 전략.
+
+    일봉 데이터 기반이므로 같은 종목+같은 날짜는 캐시된 결과를 반환한다.
+    """
 
     name = "AI"
 
@@ -53,6 +56,10 @@ class AIStrategy(BaseStrategy):
         self.provider = provider
         self.api_key = api_key
         self.model = model or DEFAULT_MODELS.get(provider, "")
+        # 캐시: {(symbol_or_date_key): StrategyResult}
+        self._cache: dict[str, StrategyResult] = {}
+        # 시장 컨텍스트 (KOSPI/KOSDAQ 지수 등)
+        self._market_context: str = ""
 
     def analyze(self, df: pd.DataFrame) -> StrategyResult:
         if len(df) < 26:
@@ -63,10 +70,25 @@ class AIStrategy(BaseStrategy):
                 detail="데이터 부족 (최소 26일 필요)",
             )
 
+        # 캐시 키: 최신 일봉 날짜 + 시가 (시가는 장중 불변 → 하루 1회 AI 호출)
+        latest = df.iloc[-1]
+        cache_key = f"{latest['date']}_{latest['open']}"
+        if cache_key in self._cache:
+            cached = self._cache[cache_key]
+            logger.debug("AI 캐시 히트: %s → %s (%.2f)", cache_key, cached.signal.value, cached.strength)
+            return cached
+
         try:
             prompt = self._build_prompt(df)
             response = self._call_ai(prompt)
-            return self._parse_response(response)
+            result = self._parse_response(response)
+            self._cache[cache_key] = result
+            # 캐시가 너무 커지지 않도록 오래된 항목 정리 (최대 100개)
+            if len(self._cache) > 100:
+                oldest_keys = list(self._cache.keys())[:-50]
+                for k in oldest_keys:
+                    del self._cache[k]
+            return result
         except Exception as e:
             logger.error("AI 전략 분석 실패: %s", e)
             return StrategyResult(
@@ -75,6 +97,16 @@ class AIStrategy(BaseStrategy):
                 strategy_name=self.name,
                 detail=f"AI 분석 오류: {e}",
             )
+
+    def clear_cache(self):
+        """캐시를 초기화한다 (매일 장 시작 시 호출)."""
+        self._cache.clear()
+        self._market_context = ""
+        logger.info("AI 전략 캐시 초기화")
+
+    def set_market_context(self, context: str):
+        """시장 컨텍스트를 설정한다 (전략 실행 전 호출)."""
+        self._market_context = context
 
     # ── 프롬프트 구성 ─────────────────────────────────────
 
@@ -142,6 +174,9 @@ class AIStrategy(BaseStrategy):
         lines.append(f"MACD Histogram: {latest['macd_hist']:.2f} ({'상승' if latest['macd_hist'] > 0 else '하락'} 모멘텀)")
         lines.append(f"볼린저밴드 위치: {bb_position:.2f} (0=하단, 0.5=중심, 1=상단)")
         lines.append(f"ATR 변동성: {latest['atr_pct']:.2f}% ({'고변동' if latest['atr_pct'] > 3 else '저변동' if latest['atr_pct'] < 1 else '보통'})")
+
+        if self._market_context:
+            lines.append(f"\n{self._market_context}")
 
         lines.append("\n이 데이터를 기반으로 매매 판단을 내려주세요.")
 

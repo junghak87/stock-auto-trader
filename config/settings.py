@@ -31,10 +31,26 @@ class TradingSettings(BaseSettings):
     """매매 관련 설정."""
 
     mode: str = Field(default="paper", alias="TRADING_MODE")
-    max_position_ratio: float = Field(default=0.1, alias="MAX_POSITION_RATIO")
+    total_budget: float = Field(default=0, alias="TOTAL_BUDGET")
+    max_position_ratio: float = Field(default=0.25, alias="MAX_POSITION_RATIO")
     stop_loss_pct: float = Field(default=5.0, alias="STOP_LOSS_PCT")
     take_profit_pct: float = Field(default=10.0, alias="TAKE_PROFIT_PCT")
+    trailing_activation_pct: float = Field(default=3.0, alias="TRAILING_ACTIVATION_PCT")
+    trailing_stop_pct: float = Field(default=2.0, alias="TRAILING_STOP_PCT")
+    daily_max_loss_pct: float = Field(default=3.0, alias="DAILY_MAX_LOSS_PCT")
+    consecutive_loss_limit: int = Field(default=3, alias="CONSECUTIVE_LOSS_LIMIT")
+    consecutive_loss_cooldown: int = Field(default=60, alias="CONSECUTIVE_LOSS_COOLDOWN")
+    limit_order_enabled: bool = Field(default=True, alias="LIMIT_ORDER_ENABLED")
+    limit_buy_offset_pct: float = Field(default=0.3, alias="LIMIT_BUY_OFFSET_PCT")
+    limit_tp_offset_pct: float = Field(default=0.3, alias="LIMIT_TP_OFFSET_PCT")
+    limit_order_timeout_sec: int = Field(default=300, alias="LIMIT_ORDER_TIMEOUT_SEC")
+    split_buy_enabled: bool = Field(default=True, alias="SPLIT_BUY_ENABLED")
+    split_buy_first_ratio: float = Field(default=0.5, alias="SPLIT_BUY_FIRST_RATIO")
+    split_buy_dip_pct: float = Field(default=2.0, alias="SPLIT_BUY_DIP_PCT")
+    split_sell_enabled: bool = Field(default=True, alias="SPLIT_SELL_ENABLED")
+    split_sell_first_ratio: float = Field(default=0.5, alias="SPLIT_SELL_FIRST_RATIO")
     max_daily_trades: int = Field(default=20, alias="MAX_DAILY_TRADES")
+    usd_krw_rate: float = Field(default=1450, alias="USD_KRW_RATE")
 
     watch_stocks_kr: str = Field(default="005930", alias="WATCH_STOCKS_KR")
     watch_stocks_us: str = Field(default="AAPL", alias="WATCH_STOCKS_US")
@@ -52,6 +68,13 @@ class TradingSettings(BaseSettings):
     @property
     def is_live(self) -> bool:
         return self.mode == "live"
+
+    @property
+    def budget_per_stock(self) -> float:
+        """종목당 최대 투자 금액을 반환한다."""
+        if self.total_budget > 0:
+            return self.total_budget * self.max_position_ratio
+        return 0
 
 
 class AISettings(BaseSettings):

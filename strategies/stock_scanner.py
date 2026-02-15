@@ -43,12 +43,14 @@ class StockScanner:
         ai_provider: str = "gemini",
         ai_api_key: str = "",
         ai_model: str = "",
+        budget_per_stock: float = 0,
     ):
         self.kis = kis_client
         self.db = database
         self.ai_provider = ai_provider
         self.ai_api_key = ai_api_key
         self.ai_model = ai_model
+        self.budget_per_stock = budget_per_stock
 
     def scan_kr_volume_rank(self) -> list[dict]:
         """국내 거래량 상위 종목을 조회한다."""
@@ -90,7 +92,22 @@ class StockScanner:
         # 거래량 상위 종목 조회
         volume_rank = self.scan_kr_volume_rank()
         if not volume_rank:
-            logger.info("거래량 상위 종목 데이터 없음 — 스캔 스킵")
+            logger.info("거래량 상위 종목 데이터 없음 -- 스캔 스킵")
+            return []
+
+        # 종목당 예산 내 매수 가능한 종목만 필터링
+        if self.budget_per_stock > 0:
+            before = len(volume_rank)
+            volume_rank = [
+                v for v in volume_rank
+                if float(v.get("price", "0").replace(",", "")) <= self.budget_per_stock
+            ]
+            filtered = before - len(volume_rank)
+            if filtered > 0:
+                logger.info("예산 필터: %d개 종목 제외 (종목당 한도: %,.0f원)", filtered, self.budget_per_stock)
+
+        if not volume_rank:
+            logger.info("예산 내 매수 가능 종목 없음 -- 스캔 스킵")
             return []
 
         # 현재 감시 중인 종목
@@ -116,6 +133,67 @@ class StockScanner:
                 self.db.add_watchlist(symbol, "KR", name=name, source="ai_scan", reason=pick.get("reason", ""))
                 added.append(pick)
                 logger.info("AI 스캔 종목 추가: %s %s — %s", symbol, name, pick.get("reason", ""))
+
+        return added
+
+    def scan_us_and_select(self, candidates: list[str] | None = None) -> list[dict]:
+        """미국 주요 종목 시세를 조회하고 AI로 유망 종목을 선별한다."""
+        # 후보 풀: 전달받은 목록 또는 주요 미국 종목
+        if not candidates:
+            candidates = [
+                "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA",
+                "AMD", "NFLX", "AVGO", "CRM", "ORCL", "PLTR", "SOFI",
+                "COIN", "SQ", "SHOP", "SNOW", "UBER", "ABNB",
+            ]
+
+        us_data = []
+        current_watchlist = self.db.get_watchlist_symbols("US")
+
+        for symbol in candidates:
+            try:
+                price = self.kis.get_us_price(symbol)
+                us_data.append({
+                    "symbol": symbol,
+                    "name": price.name,
+                    "price": f"{price.price:.2f}",
+                    "change_pct": f"{price.change_pct:.2f}",
+                    "volume": str(price.volume),
+                })
+                time.sleep(0.08 if self.kis.is_live else 0.25)
+            except Exception as e:
+                logger.debug("US 시세 조회 실패 [%s]: %s", symbol, e)
+
+        if not us_data:
+            logger.info("US 시세 데이터 없음 -- 스캔 스킵")
+            return []
+
+        # AI 프롬프트 구성
+        lines = ["[미국 주요 종목 시세]"]
+        lines.append("종목코드 | 종목명 | 현재가($) | 등락률 | 거래량")
+        lines.append("-" * 80)
+        for item in us_data:
+            lines.append(f"{item['symbol']} | {item['name']} | ${item['price']} | {item['change_pct']}% | {item['volume']}")
+        if current_watchlist:
+            lines.append(f"\n[현재 감시 중인 종목]: {', '.join(current_watchlist)}")
+            lines.append("이미 감시 중인 종목은 제외하고 새로운 종목만 선별해주세요.")
+        lines.append("\n위 데이터를 분석하여 단기 매매에 유망한 미국 종목을 선별해주세요.")
+        prompt = "\n".join(lines)
+
+        try:
+            response = self._call_ai(prompt)
+            picks = self._parse_scan_response(response)
+        except Exception as e:
+            logger.error("AI US 종목 스캔 실패: %s", e)
+            return []
+
+        added = []
+        for pick in picks:
+            symbol = pick["symbol"]
+            if symbol not in current_watchlist:
+                name = next((v["name"] for v in us_data if v["symbol"] == symbol), "")
+                self.db.add_watchlist(symbol, "US", name=name, source="ai_scan", reason=pick.get("reason", ""))
+                added.append(pick)
+                logger.info("AI US 스캔 종목 추가: %s %s — %s", symbol, name, pick.get("reason", ""))
 
         return added
 

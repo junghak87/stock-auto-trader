@@ -26,6 +26,7 @@ TR_IDS = {
     # 국내 주식
     "kr_price": "FHKST01010100",
     "kr_daily_price": "FHKST01010400",
+    "kr_minute_price": "FHKST03010200",
     "kr_buy_live": "TTTC0802U",
     "kr_sell_live": "TTTC0801U",
     "kr_buy_paper": "VTTC0802U",
@@ -102,6 +103,19 @@ class OHLCVData:
     volume: int
 
 
+# 주요 NYSE 상장 종목 (거래소 자동 감지용)
+_NYSE_SYMBOLS = {
+    "BRK.A", "BRK.B", "JPM", "V", "WMT", "JNJ", "PG", "MA", "UNH",
+    "HD", "DIS", "BAC", "KO", "PEP", "ABBV", "MRK", "CVX", "XOM",
+    "ABT", "CRM", "TMO", "DHR", "ACN", "LLY", "NKE", "MDT", "PM",
+    "NEE", "HON", "UPS", "RTX", "IBM", "GE", "CAT", "BA", "MMM",
+    "GS", "AXP", "BLK", "C", "WFC", "MS", "SCHW", "USB", "T", "VZ",
+    "LOW", "SPGI", "SYK", "DE", "BDX", "CI", "PLD", "SO", "DUK",
+    "CL", "ZTS", "CME", "ICE", "MCO", "SHW", "PNC", "TFC", "AIG",
+    "F", "GM", "WBA", "CVS", "HUM", "EL", "FDX", "UNP", "NSC",
+}
+
+
 class KISClient:
     """한국투자증권 REST API 클라이언트."""
 
@@ -121,6 +135,13 @@ class KISClient:
         self.token_expires_at: float = 0
         self._session = requests.Session()
         self._load_or_issue_token()
+
+    @staticmethod
+    def detect_exchange(symbol: str) -> tuple[str, str]:
+        """심볼로 거래소를 추정한다. (시세용 3자리, 주문용 4자리)"""
+        if symbol.upper() in _NYSE_SYMBOLS:
+            return "NYS", "NYSE"
+        return "NAS", "NASD"
 
     # ── 인증 ──────────────────────────────────────────────
 
@@ -182,18 +203,52 @@ class KISClient:
         }
 
     def _get(self, path: str, tr_id: str, params: dict | None = None) -> dict:
-        """GET 요청."""
+        """GET 요청 (일시적 오류 시 자동 재시도)."""
         url = f"{self.base_url}{path}"
-        resp = self._session.get(url, headers=self._headers(tr_id), params=params, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = self._session.get(url, headers=self._headers(tr_id), params=params, timeout=10)
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.ConnectionError as e:
+                last_exc = e
+                logger.warning("GET %s 연결 오류 (시도 %d/3): %s", path, attempt + 1, e)
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code in (500, 502, 503, 504):
+                    last_exc = e
+                    logger.warning("GET %s 서버 오류 %d (시도 %d/3)", path, e.response.status_code, attempt + 1)
+                else:
+                    raise
+            except requests.exceptions.Timeout as e:
+                last_exc = e
+                logger.warning("GET %s 타임아웃 (시도 %d/3)", path, attempt + 1)
+            time.sleep(1.0 * (attempt + 1))
+        raise last_exc  # type: ignore[misc]
 
     def _post(self, path: str, tr_id: str, body: dict) -> dict:
-        """POST 요청."""
+        """POST 요청 (일시적 오류 시 자동 재시도)."""
         url = f"{self.base_url}{path}"
-        resp = self._session.post(url, headers=self._headers(tr_id), json=body, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = self._session.post(url, headers=self._headers(tr_id), json=body, timeout=10)
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.ConnectionError as e:
+                last_exc = e
+                logger.warning("POST %s 연결 오류 (시도 %d/3): %s", path, attempt + 1, e)
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code in (500, 502, 503, 504):
+                    last_exc = e
+                    logger.warning("POST %s 서버 오류 %d (시도 %d/3)", path, e.response.status_code, attempt + 1)
+                else:
+                    raise
+            except requests.exceptions.Timeout as e:
+                last_exc = e
+                logger.warning("POST %s 타임아웃 (시도 %d/3)", path, attempt + 1)
+            time.sleep(1.0 * (attempt + 1))
+        raise last_exc  # type: ignore[misc]
 
     def _tr(self, key: str) -> str:
         """실전/모의에 맞는 TR_ID를 반환."""
@@ -257,15 +312,51 @@ class KISClient:
             ))
         return result
 
+    def get_kr_minute_prices(self, symbol: str, end_time: str = "") -> list[OHLCVData]:
+        """국내 주식 1분봉 데이터를 조회한다 (최대 30개).
+
+        Args:
+            symbol: 종목코드
+            end_time: 조회 종료 시각 (HHMMSS). 빈 값이면 현재 시각.
+        """
+        if not end_time:
+            end_time = datetime.now().strftime("%H%M%S")
+        data = self._get(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            TR_IDS["kr_minute_price"],
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+                "FID_INPUT_HOUR_1": end_time,
+                "FID_PW_DATA_INCU_YN": "N",
+                "FID_ETC_CLS_CODE": "",
+            },
+        )
+        result = []
+        for item in data.get("output2", []):
+            hour = item.get("stck_cntg_hour", "")
+            date_str = item.get("stck_bsop_date", datetime.now().strftime("%Y%m%d"))
+            result.append(OHLCVData(
+                date=f"{date_str} {hour}",
+                open=float(item.get("stck_oprc", 0)),
+                high=float(item.get("stck_hgpr", 0)),
+                low=float(item.get("stck_lwpr", 0)),
+                close=float(item.get("stck_prpr", 0)),
+                volume=int(item.get("cntg_vol", 0)),
+            ))
+        return result
+
     # ── 해외 주식 시세 ────────────────────────────────────
 
-    def get_us_price(self, symbol: str, exchange: str = "NAS") -> StockPrice:
+    def get_us_price(self, symbol: str, exchange: str = "") -> StockPrice:
         """해외 주식 현재가를 조회한다.
 
         Args:
             symbol: 종목코드 (예: AAPL)
-            exchange: 거래소 코드 (NAS=나스닥, NYS=뉴욕, AMS=아멕스)
+            exchange: 거래소 코드 (NAS=나스닥, NYS=뉴욕, AMS=아멕스). 빈 값이면 자동 감지.
         """
+        if not exchange:
+            exchange, _ = self.detect_exchange(symbol)
         data = self._get(
             "/uapi/overseas-price/v1/quotations/price",
             TR_IDS["us_price"],
@@ -294,12 +385,14 @@ class KISClient:
             market="US",
         )
 
-    def get_us_daily_prices(self, symbol: str, exchange: str = "NAS", period: str = "0", count: int = 60) -> list[OHLCVData]:
+    def get_us_daily_prices(self, symbol: str, exchange: str = "", period: str = "0", count: int = 60) -> list[OHLCVData]:
         """해외 주식 일봉 데이터를 조회한다.
 
         Args:
             period: 0(일), 1(주), 2(월)
         """
+        if not exchange:
+            exchange, _ = self.detect_exchange(symbol)
         data = self._get(
             "/uapi/overseas-price/v1/quotations/dailyprice",
             TR_IDS["us_daily_price"],
@@ -323,6 +416,29 @@ class KISClient:
                 volume=int(item.get("tvol", 0)),
             ))
         return result
+
+    # ── 국내 지수 조회 ──────────────────────────────────
+
+    def get_kr_index(self, index_code: str = "0001") -> dict:
+        """국내 업종 지수를 조회한다.
+
+        Args:
+            index_code: 0001=KOSPI, 1001=KOSDAQ
+        """
+        data = self._get(
+            "/uapi/domestic-stock/v1/quotations/inquire-index-price",
+            "FHPUP02100000",
+            params={"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": index_code},
+        )
+        o = data.get("output", {})
+        return {
+            "index_code": index_code,
+            "name": "KOSPI" if index_code == "0001" else "KOSDAQ",
+            "price": float(o.get("bstp_nmix_prpr", 0)),
+            "change": float(o.get("bstp_nmix_prdy_vrss", 0)),
+            "change_pct": float(o.get("bstp_nmix_prdy_ctrt", 0)),
+            "volume": int(o.get("acml_vol", 0)),
+        }
 
     # ── 국내 주식 주문 ────────────────────────────────────
 
@@ -366,6 +482,26 @@ class KISClient:
         data = self._post("/uapi/domestic-stock/v1/trading/order-cash", tr_id, body)
         return self._parse_kr_order(data, symbol, "sell", qty, price)
 
+    def cancel_kr(self, order_no: str, symbol: str, qty: int) -> OrderResult:
+        """국내 주식 주문을 취소한다."""
+        acct_prefix = self.account_no.split("-")[0]
+        acct_suffix = self.account_no.split("-")[1] if "-" in self.account_no else "01"
+
+        body = {
+            "CANO": acct_prefix,
+            "ACNT_PRDT_CD": acct_suffix,
+            "KRX_FWDG_ORD_ORGNO": "",
+            "ORGN_ODNO": order_no,
+            "ORD_DVSN": "01",
+            "RVSE_CNCL_DVSN_CD": "02",
+            "ORD_QTY": str(qty),
+            "ORD_UNPR": "0",
+            "QTY_ALL_ORD_YN": "Y",
+        }
+        tr_id = self._tr("kr_cancel")
+        data = self._post("/uapi/domestic-stock/v1/trading/order-rvsecncl", tr_id, body)
+        return self._parse_kr_order(data, symbol, "cancel", qty, 0)
+
     def _parse_kr_order(self, data: dict, symbol: str, side: str, qty: int, price: float) -> OrderResult:
         output = data.get("output", {})
         rt_cd = data.get("rt_cd", "1")
@@ -381,8 +517,10 @@ class KISClient:
 
     # ── 해외 주식 주문 ────────────────────────────────────
 
-    def buy_us(self, symbol: str, qty: int, price: float = 0, exchange: str = "NASD") -> OrderResult:
+    def buy_us(self, symbol: str, qty: int, price: float = 0, exchange: str = "") -> OrderResult:
         """해외 주식 매수 주문."""
+        if not exchange:
+            _, exchange = self.detect_exchange(symbol)
         acct_prefix = self.account_no.split("-")[0]
         acct_suffix = self.account_no.split("-")[1] if "-" in self.account_no else "01"
         order_type = "00" if price > 0 else "31"  # 00=지정가, 31=시장가(MOO 아님, LOO)
@@ -400,8 +538,10 @@ class KISClient:
         data = self._post("/uapi/overseas-stock/v1/trading/order", tr_id, body)
         return self._parse_us_order(data, symbol, "buy", qty, price)
 
-    def sell_us(self, symbol: str, qty: int, price: float = 0, exchange: str = "NASD") -> OrderResult:
+    def sell_us(self, symbol: str, qty: int, price: float = 0, exchange: str = "") -> OrderResult:
         """해외 주식 매도 주문."""
+        if not exchange:
+            _, exchange = self.detect_exchange(symbol)
         acct_prefix = self.account_no.split("-")[0]
         acct_suffix = self.account_no.split("-")[1] if "-" in self.account_no else "01"
         order_type = "00" if price > 0 else "31"
@@ -479,42 +619,49 @@ class KISClient:
         return positions
 
     def get_us_balance(self) -> list[Position]:
-        """해외 주식 잔고를 조회한다."""
+        """해외 주식 잔고를 조회한다 (NASDAQ + NYSE 모두 조회)."""
         acct_prefix = self.account_no.split("-")[0]
         acct_suffix = self.account_no.split("-")[1] if "-" in self.account_no else "01"
         tr_id = self._tr("us_balance")
 
-        data = self._get(
-            "/uapi/overseas-stock/v1/trading/inquire-balance",
-            tr_id,
-            params={
-                "CANO": acct_prefix,
-                "ACNT_PRDT_CD": acct_suffix,
-                "OVRS_EXCG_CD": "NASD",
-                "TR_CRCY_CD": "USD",
-                "CTX_AREA_FK200": "",
-                "CTX_AREA_NK200": "",
-            },
-        )
         positions = []
-        for item in data.get("output1", []):
-            qty = int(item.get("ovrs_cblc_qty", 0))
-            if qty == 0:
-                continue
-            avg_price = float(item.get("pchs_avg_pric", 0))
-            current_price = float(item.get("now_pric2", item.get("ovrs_now_pric", 0)))
-            pnl = float(item.get("frcr_evlu_pfls_amt", 0))
-            pnl_pct = float(item.get("evlu_pfls_rt", 0))
-            positions.append(Position(
-                symbol=item.get("ovrs_pdno", ""),
-                name=item.get("ovrs_item_name", ""),
-                qty=qty,
-                avg_price=avg_price,
-                current_price=current_price,
-                pnl=pnl,
-                pnl_pct=pnl_pct,
-                market="US",
-            ))
+        seen = set()
+        for exchange in ("NASD", "NYSE", "AMEX"):
+            try:
+                data = self._get(
+                    "/uapi/overseas-stock/v1/trading/inquire-balance",
+                    tr_id,
+                    params={
+                        "CANO": acct_prefix,
+                        "ACNT_PRDT_CD": acct_suffix,
+                        "OVRS_EXCG_CD": exchange,
+                        "TR_CRCY_CD": "USD",
+                        "CTX_AREA_FK200": "",
+                        "CTX_AREA_NK200": "",
+                    },
+                )
+                for item in data.get("output1", []):
+                    qty = int(item.get("ovrs_cblc_qty", 0))
+                    symbol = item.get("ovrs_pdno", "")
+                    if qty == 0 or symbol in seen:
+                        continue
+                    seen.add(symbol)
+                    avg_price = float(item.get("pchs_avg_pric", 0))
+                    current_price = float(item.get("now_pric2", item.get("ovrs_now_pric", 0)))
+                    pnl = float(item.get("frcr_evlu_pfls_amt", 0))
+                    pnl_pct = float(item.get("evlu_pfls_rt", 0))
+                    positions.append(Position(
+                        symbol=symbol,
+                        name=item.get("ovrs_item_name", ""),
+                        qty=qty,
+                        avg_price=avg_price,
+                        current_price=current_price,
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
+                        market="US",
+                    ))
+            except Exception as e:
+                logger.debug("해외 잔고 조회 [%s]: %s", exchange, e)
         return positions
 
     def get_all_positions(self) -> list[Position]:
