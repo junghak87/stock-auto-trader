@@ -40,6 +40,23 @@ nano .env
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`
 - `GEMINI_API_KEY` (AI 전략 사용 시)
 
+## SELinux 설정 (Rocky Linux)
+
+Rocky Linux는 SELinux가 enforcing 상태로 venv 내 Python 실행이 차단될 수 있습니다.
+
+**방법 1: venv에만 실행 권한 부여 (권장)**
+```bash
+sudo chcon -R -t bin_t /home/rocky/stock-auto-trader/.venv/bin/
+```
+
+**방법 2: SELinux를 permissive로 변경**
+```bash
+sudo setenforce 0
+sudo sed -i 's/SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
+```
+
+> 전용 서버(SSH만 오픈)라면 permissive도 무방합니다.
+
 ## Step 4: 테스트 실행
 
 ```bash
