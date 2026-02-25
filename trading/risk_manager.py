@@ -66,6 +66,9 @@ class RiskManager:
         # 일일 최대 손실 체크 캐시 (60초)
         self._daily_loss_cache_time: datetime | None = None
         self._daily_loss_cache_result: tuple[bool, str] = (True, "")
+        # 현금 잔고 캐시 (30초) — 같은 사이클 내 반복 API 호출 방지
+        self._cash_cache: dict | None = None
+        self._cash_cache_time: datetime | None = None
 
     def can_trade(self) -> tuple[bool, str]:
         """현재 거래가 가능한 상태인지 확인한다."""
@@ -105,7 +108,7 @@ class RiskManager:
         result = (True, "")
         if self.total_budget > 0:
             try:
-                cash_info = self.kis.get_cash_balance()
+                cash_info = self._get_cash_info()
                 realized_pnl = cash_info.get("total_pnl", 0)
                 max_loss = self.total_budget * (self.daily_max_loss_pct / 100)
 
@@ -137,10 +140,19 @@ class RiskManager:
             logger.info("연속 손절 카운트 리셋 (익절 발생)")
         self._consecutive_losses = 0
 
+    def _get_cash_info(self) -> dict:
+        """현금 잔고를 캐시하여 반환한다 (30초 TTL)."""
+        now = datetime.now()
+        if self._cash_cache and self._cash_cache_time and (now - self._cash_cache_time).total_seconds() < 30:
+            return self._cash_cache
+        self._cash_cache = self.kis.get_cash_balance()
+        self._cash_cache_time = now
+        return self._cash_cache
+
     def calculate_buy_qty(self, symbol: str, price: float, market: str = "KR") -> int:
         """매수 가능 수량을 계산한다 (총 예산 또는 계좌 평가액 기반)."""
         try:
-            cash_info = self.kis.get_cash_balance()
+            cash_info = self._get_cash_info()
             available_cash = cash_info.get("cash", 0)
 
             if price <= 0:

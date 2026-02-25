@@ -98,21 +98,38 @@ class TelegramNotifier:
         msg += f"시각: {datetime.now().strftime('%H:%M:%S')}"
         self.send(msg)
 
-    def notify_daily_summary(self, total_trades: int, total_pnl: float, positions: list):
-        """일일 수익률 요약 알림."""
+    def notify_daily_summary(
+        self, total_trades: int, total_pnl: float, positions: list,
+        cash_info: dict | None = None,
+    ):
+        """일일 수익률 요약 알림 (계좌 잔고 포함)."""
         pnl_emoji = "📈" if total_pnl >= 0 else "📉"
         msg = (
             f"{pnl_emoji} <b>일일 매매 요약</b>\n"
             f"날짜: {datetime.now().strftime('%Y-%m-%d')}\n"
             f"총 거래: {total_trades}건\n"
             f"일일 손익: {total_pnl:+,.0f}원\n"
-            f"보유 종목: {len(positions)}개\n"
         )
+        # 계좌 잔고
+        if cash_info:
+            msg += (
+                f"\n💰 <b>계좌 잔고</b>\n"
+                f"  총 평가: {cash_info.get('total_eval', 0):,.0f}원\n"
+                f"  현금: {cash_info.get('cash', 0):,.0f}원\n"
+                f"  주식 평가: {cash_info.get('stock_eval', 0):,.0f}원\n"
+            )
+        # 보유 종목
+        msg += f"\n📋 <b>보유 종목: {len(positions)}개</b>\n"
         if positions:
-            msg += "\n<b>보유 현황:</b>\n"
+            total_stock_pnl = sum(p.pnl for p in positions)
             for p in positions[:10]:
-                pnl_sign = "+" if p.pnl >= 0 else ""
-                msg += f"  {p.symbol} {p.name}: {p.qty}주 ({pnl_sign}{p.pnl_pct:.1f}%)\n"
+                pnl_sign = "+" if p.pnl_pct >= 0 else ""
+                msg += f"  {p.symbol} {p.name}: {p.qty}주 ({pnl_sign}{p.pnl_pct:.1f}%) {p.pnl:+,.0f}원\n"
+            if len(positions) > 10:
+                msg += f"  ... 외 {len(positions) - 10}개\n"
+            msg += f"  <b>보유 합계: {total_stock_pnl:+,.0f}원</b>\n"
+        else:
+            msg += "  없음\n"
         self.send(msg)
 
     def notify_error(self, error_msg: str):

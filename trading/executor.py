@@ -55,15 +55,12 @@ class TradingExecutor:
         self._balance_cache: dict[str, list] = {}
         self._balance_cache_time: datetime | None = None
 
-    def _is_holding(self, symbol: str, market: str) -> bool:
-        """해당 종목의 보유 여부를 확인한다 (30초 캐시)."""
+    def _get_cached_positions(self, market: str) -> list:
+        """캐시된 잔고를 반환한다 (30초 TTL)."""
         now = datetime.now()
-        if self._balance_cache_time and (now - self._balance_cache_time).total_seconds() < 30:
-            positions = self._balance_cache.get(market, [])
-        else:
+        if not self._balance_cache_time or (now - self._balance_cache_time).total_seconds() >= 30:
             self._balance_cache.clear()
             self._balance_cache_time = now
-            positions = []
 
         if market not in self._balance_cache:
             try:
@@ -73,9 +70,14 @@ class TradingExecutor:
                     positions = self.kis.get_us_balance()
                 self._balance_cache[market] = positions
             except Exception:
-                return False
+                return []
 
-        return any(p.symbol == symbol and p.qty > 0 for p in self._balance_cache.get(market, []))
+        return self._balance_cache.get(market, [])
+
+    def _is_holding(self, symbol: str, market: str) -> bool:
+        """해당 종목의 보유 여부를 확인한다 (30초 캐시)."""
+        positions = self._get_cached_positions(market)
+        return any(p.symbol == symbol and p.qty > 0 for p in positions)
 
     def execute_signal(self, symbol: str, market: str, result: StrategyResult) -> OrderResult | None:
         """전략 시그널에 따라 주문을 실행한다."""
@@ -112,11 +114,6 @@ class TradingExecutor:
         """매수 주문을 실행한다 (이미 보유 중이면 스킵)."""
         try:
             if market == "KR":
-                positions = self.kis.get_kr_balance()
-                held = next((p for p in positions if p.symbol == symbol), None)
-                if held and held.qty > 0:
-                    logger.info("이미 보유 중 -- 매수 스킵: %s (%d주)", symbol, held.qty)
-                    return None
                 price_info = self.kis.get_kr_price(symbol)
                 price = price_info.price
                 qty = self.risk.calculate_buy_qty(symbol, price, market)
@@ -130,9 +127,10 @@ class TradingExecutor:
                 else:
                     buy_qty = qty
 
-                # 지정가 매수: 현재가 대비 offset만큼 낮은 가격
+                # 지정가 매수: 현재가 대비 offset만큼 낮은 가격 (모의투자: offset=0 즉시 체결)
                 if self.limit_order_enabled:
-                    limit_price = self._round_kr_tick(int(price * (1 - self.limit_buy_offset_pct / 100)))
+                    offset = 0 if not self.kis.is_live else self.limit_buy_offset_pct
+                    limit_price = self._round_kr_tick(int(price * (1 - offset / 100)))
                     order = self.kis.buy_kr(symbol, buy_qty, price=limit_price)
                     if order.success:
                         self._pending_orders[symbol] = {
@@ -151,13 +149,7 @@ class TradingExecutor:
                         "first_buy_qty": buy_qty, "market": market,
                     }
             else:
-                # US: 시장가 유지 (v1)
-                _, exchange_4 = self.kis.detect_exchange(symbol)
-                positions = self._get_us_positions_single(exchange_4)
-                held = next((p for p in positions if p.symbol == symbol), None)
-                if held and held.qty > 0:
-                    logger.info("이미 보유 중 -- 매수 스킵: %s (%d주)", symbol, held.qty)
-                    return None
+                # US
                 price_info = self.kis.get_us_price(symbol)
                 price = price_info.price
                 qty = self.risk.calculate_buy_qty(symbol, price, market)
@@ -221,12 +213,8 @@ class TradingExecutor:
     def _execute_sell(self, symbol: str, market: str, result: StrategyResult) -> OrderResult | None:
         """매도 주문을 실행한다 (보유 중인 경우에만)."""
         try:
-            # 보유 수량 확인
-            if market == "KR":
-                positions = self.kis.get_kr_balance()
-            else:
-                positions = self.kis.get_us_balance()
-
+            # 보유 수량 확인 (캐시 활용)
+            positions = self._get_cached_positions(market)
             held = next((p for p in positions if p.symbol == symbol), None)
             if not held or held.qty <= 0:
                 logger.info("보유하지 않은 종목 — 매도 스킵: %s", symbol)
@@ -277,10 +265,11 @@ class TradingExecutor:
                 sell_qty = qty
                 self._position_stages.pop(symbol, None)
 
-            # 지정가 익절 (KR만, 현재가 대비 +offset%)
+            # 지정가 익절 (KR만, 현재가 대비 +offset%, 모의투자: offset=0 즉시 체결)
             if market == "KR" and self.limit_order_enabled:
                 price_info = self.kis.get_kr_price(symbol)
-                limit_price = self._round_kr_tick(int(price_info.price * (1 + self.limit_tp_offset_pct / 100)))
+                tp_offset = 0 if not self.kis.is_live else self.limit_tp_offset_pct
+                limit_price = self._round_kr_tick(int(price_info.price * (1 + tp_offset / 100)))
                 order = self.kis.sell_kr(symbol, sell_qty, price=limit_price)
                 if order.success:
                     self._pending_orders[f"{symbol}_tp"] = {
@@ -331,7 +320,8 @@ class TradingExecutor:
 
             if market == "KR":
                 if self.limit_order_enabled:
-                    limit_price = self._round_kr_tick(int(current_price * (1 - self.limit_buy_offset_pct / 100)))
+                    offset = 0 if not self.kis.is_live else self.limit_buy_offset_pct
+                    limit_price = self._round_kr_tick(int(current_price * (1 - offset / 100)))
                     order = self.kis.buy_kr(symbol, add_qty, price=limit_price)
                 else:
                     order = self.kis.buy_kr(symbol, add_qty, price=0)

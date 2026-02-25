@@ -184,6 +184,7 @@ class TradingJobs:
         positions = self.kis.get_all_positions()
 
         total_trades = len(trades)
+        cash_info = None
         try:
             cash_info = self.kis.get_cash_balance()
             total_pnl = cash_info.get("total_pnl", 0)
@@ -194,7 +195,7 @@ class TradingJobs:
         loss_count = total_trades - win_count
 
         self.db.save_daily_summary(total_trades, total_pnl, win_count, loss_count)
-        self.notifier.notify_daily_summary(total_trades, total_pnl, positions)
+        self.notifier.notify_daily_summary(total_trades, total_pnl, positions, cash_info=cash_info)
 
         # 전략별 성과 저장
         try:
