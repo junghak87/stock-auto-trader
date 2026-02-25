@@ -9,6 +9,8 @@ Usage:
 import argparse
 import io
 import logging
+import logging.handlers
+import os
 import signal
 import sys
 import time
@@ -35,12 +37,19 @@ from scheduler.jobs import TradingJobs
 
 # ── 로깅 설정 ─────────────────────────────────────────────
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")),
-        logging.FileHandler("trading.log", encoding="utf-8"),
+        logging.handlers.TimedRotatingFileHandler(
+            os.path.join(LOG_DIR, "trading.log"), encoding="utf-8",
+            when="midnight",    # 자정마다 롤링
+            backupCount=30,     # 30일 보관 후 자동 삭제
+        ),
     ],
 )
 logger = logging.getLogger(__name__)
