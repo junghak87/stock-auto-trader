@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # ── Provider별 기본 모델 ──────────────────────────────────
 DEFAULT_MODELS = {
-    "gemini": "gemini-2.0-flash",
+    "gemini": "gemini-2.5-flash-lite",
     "claude": "claude-haiku-4-5-20250514",
     "openai": "gpt-4o-mini",
 }
@@ -61,6 +61,7 @@ class AIStrategy(BaseStrategy):
         self._cache: dict[str, StrategyResult] = {}
         # 시장 컨텍스트 (KOSPI/KOSDAQ 지수 등)
         self._market_context: str = ""
+        self._last_ai_call: float = 0  # rate limit 방어용 타임스탬프
 
     def analyze(self, df: pd.DataFrame) -> StrategyResult:
         if len(df) < 26:
@@ -186,7 +187,7 @@ class AIStrategy(BaseStrategy):
     # ── AI API 호출 ───────────────────────────────────────
 
     def _call_ai(self, prompt: str) -> str:
-        """설정된 provider에 따라 AI API를 호출한다 (429 재시도 포함)."""
+        """설정된 provider에 따라 AI API를 호출한다 (rate limit 방어 + 429 재시도)."""
         providers = {
             "gemini": self._call_gemini,
             "claude": self._call_claude,
@@ -196,10 +197,19 @@ class AIStrategy(BaseStrategy):
         if not call_fn:
             raise ValueError(f"지원하지 않는 AI provider: {self.provider}")
 
+        # Gemini 무료 tier: 15 RPM → 최소 5초 간격
+        if self.provider == "gemini":
+            now = time.time()
+            elapsed = now - self._last_ai_call
+            if elapsed < 5:
+                time.sleep(5 - elapsed)
+
         delays = [10, 30, 60]
         for attempt in range(3):
             try:
-                return call_fn(prompt)
+                result = call_fn(prompt)
+                self._last_ai_call = time.time()
+                return result
             except Exception as e:
                 if "429" in str(e) and attempt < 2:
                     logger.warning("AI API 429 rate limit — %d초 후 재시도 (%d/3)", delays[attempt], attempt + 1)

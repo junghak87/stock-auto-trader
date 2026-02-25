@@ -67,6 +67,7 @@ class StockScanner:
         self.ai_model = ai_model
         self.budget_per_stock = budget_per_stock
         self.last_drops: list[str] = []
+        self._last_ai_call: float = 0  # rate limit 방어용 타임스탬프
 
     def scan_kr_volume_rank(self) -> list[dict]:
         """국내 거래량 상위 종목을 조회한다."""
@@ -284,11 +285,20 @@ class StockScanner:
             return []
 
     def _call_ai(self, prompt: str) -> str:
-        """AI API를 호출한다 (429 재시도 포함)."""
+        """AI API를 호출한다 (rate limit 방어 + 429 재시도)."""
+        # Gemini 무료 tier: 15 RPM → 최소 5초 간격
+        if self.ai_provider == "gemini":
+            now = time.time()
+            elapsed = now - self._last_ai_call
+            if elapsed < 5:
+                time.sleep(5 - elapsed)
+
         delays = [10, 30, 60]
         for attempt in range(3):
             try:
-                return self._call_ai_once(prompt)
+                result = self._call_ai_once(prompt)
+                self._last_ai_call = time.time()
+                return result
             except Exception as e:
                 if "429" in str(e) and attempt < 2:
                     logger.warning("AI API 429 rate limit — %d초 후 재시도 (%d/3)", delays[attempt], attempt + 1)
@@ -304,7 +314,7 @@ class StockScanner:
 
             client = genai.Client(api_key=self.ai_api_key)
             response = client.models.generate_content(
-                model=self.ai_model or "gemini-2.0-flash",
+                model=self.ai_model or "gemini-2.5-flash-lite",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=SCAN_SYSTEM_PROMPT,
