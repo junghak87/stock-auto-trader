@@ -51,10 +51,44 @@ class TradingExecutor:
         self._pending_orders: dict[str, dict] = {}
         # 분할 매수 단계 추적 {symbol: {stage, first_buy_price, first_buy_qty, market, ...}}
         self._position_stages: dict[str, dict] = {}
+        # 잔고 캐시 (매 전략 실행 사이클에서 반복 API 호출 방지)
+        self._balance_cache: dict[str, list] = {}
+        self._balance_cache_time: datetime | None = None
+
+    def _is_holding(self, symbol: str, market: str) -> bool:
+        """해당 종목의 보유 여부를 확인한다 (30초 캐시)."""
+        now = datetime.now()
+        if self._balance_cache_time and (now - self._balance_cache_time).total_seconds() < 30:
+            positions = self._balance_cache.get(market, [])
+        else:
+            self._balance_cache.clear()
+            self._balance_cache_time = now
+            positions = []
+
+        if market not in self._balance_cache:
+            try:
+                if market == "KR":
+                    positions = self.kis.get_kr_balance()
+                else:
+                    positions = self.kis.get_us_balance()
+                self._balance_cache[market] = positions
+            except Exception:
+                return False
+
+        return any(p.symbol == symbol and p.qty > 0 for p in self._balance_cache.get(market, []))
 
     def execute_signal(self, symbol: str, market: str, result: StrategyResult) -> OrderResult | None:
         """전략 시그널에 따라 주문을 실행한다."""
         if result.signal == Signal.HOLD:
+            return None
+
+        # 보유 여부 사전 확인 (불필요한 알림/API 호출 방지)
+        is_held = self._is_holding(symbol, market)
+        if result.signal == Signal.SELL and not is_held:
+            logger.debug("미보유 종목 매도 시그널 무시: %s", symbol)
+            return None
+        if result.signal == Signal.BUY and is_held:
+            logger.debug("보유 중 종목 매수 시그널 무시: %s", symbol)
             return None
 
         # 거래 가능 여부 확인

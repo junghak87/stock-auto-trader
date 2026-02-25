@@ -7,6 +7,7 @@ AI를 활용하여 유망 종목을 선별하여 감시 목록에 추가한다.
 import json
 import logging
 import time
+import traceback
 
 from core.kis_client import KISClient
 from core.database import Database
@@ -32,6 +33,20 @@ SCAN_SYSTEM_PROMPT = """당신은 주식 종목 선별 전문가입니다.
 
 최대 5개 종목만 선별하세요. 유망 종목이 없으면 빈 리스트를 반환하세요."""
 
+ROTATE_SYSTEM_PROMPT = """당신은 주식 종목 선별 전문가입니다.
+현재 감시 중인 종목을 재평가하고, 거래량 상위 종목에서 신규 유망 종목을 찾아주세요.
+
+재평가 기준:
+- 기존 종목 중 거래량이 급감하거나 횡보하는 종목은 제거 대상
+- 기존 종목 중 추세가 반전된 종목은 제거 대상
+- 신규 종목은 거래량 급증, 적절한 변동성(1~5%), 모멘텀이 있는 종목
+- 과도하게 급등(+10% 이상)하여 리스크가 높은 종목은 제외
+
+반드시 아래 JSON 형식으로만 응답하세요:
+{"picks": [{"symbol": "종목코드", "reason": "선별 사유"}], "drops": ["제거할종목코드1", "제거할종목코드2"], "market_sentiment": "bullish 또는 bearish 또는 neutral", "summary": "시장 분위기 한줄 요약"}
+
+picks는 최대 5개, drops는 더 이상 유망하지 않은 기존 종목만 포함하세요."""
+
 
 class StockScanner:
     """AI 기반 종목 스캐너."""
@@ -51,6 +66,7 @@ class StockScanner:
         self.ai_api_key = ai_api_key
         self.ai_model = ai_model
         self.budget_per_stock = budget_per_stock
+        self.last_drops: list[str] = []
 
     def scan_kr_volume_rank(self) -> list[dict]:
         """국내 거래량 상위 종목을 조회한다."""
@@ -87,8 +103,13 @@ class StockScanner:
             logger.error("거래량 상위 종목 조회 실패: %s", e)
             return []
 
-    def scan_and_select(self) -> list[dict]:
-        """거래량 상위 종목을 AI로 분석하여 유망 종목을 선별한다."""
+    def scan_and_select(self, rotate: bool = False) -> list[dict]:
+        """거래량 상위 종목을 AI로 분석하여 유망 종목을 선별한다.
+
+        rotate=True이면 기존 watchlist 종목도 재평가하여 drops를 반환한다.
+        """
+        self.last_drops = []
+
         # 거래량 상위 종목 조회
         volume_rank = self.scan_kr_volume_rank()
         if not volume_rank:
@@ -114,12 +135,17 @@ class StockScanner:
         current_watchlist = self.db.get_watchlist_symbols("KR")
 
         # AI에게 전달할 데이터 구성
-        prompt = self._build_scan_prompt(volume_rank, current_watchlist)
+        if rotate:
+            prompt = self._build_rotate_prompt(volume_rank, current_watchlist)
+        else:
+            prompt = self._build_scan_prompt(volume_rank, current_watchlist)
 
         # AI 호출
         try:
             response = self._call_ai(prompt)
             picks = self._parse_scan_response(response)
+            if rotate:
+                self.last_drops = self._parse_drops(response)
         except Exception as e:
             logger.error("AI 종목 스캔 실패: %s", e)
             return []
@@ -136,7 +162,7 @@ class StockScanner:
 
         return added
 
-    def scan_us_and_select(self, candidates: list[str] | None = None) -> list[dict]:
+    def scan_us_and_select(self, candidates: list[str] | None = None, rotate: bool = False) -> list[dict]:
         """미국 주요 종목 시세를 조회하고 AI로 유망 종목을 선별한다."""
         # 후보 풀: 전달받은 목록 또는 주요 미국 종목
         if not candidates:
@@ -175,13 +201,19 @@ class StockScanner:
             lines.append(f"{item['symbol']} | {item['name']} | ${item['price']} | {item['change_pct']}% | {item['volume']}")
         if current_watchlist:
             lines.append(f"\n[현재 감시 중인 종목]: {', '.join(current_watchlist)}")
-            lines.append("이미 감시 중인 종목은 제외하고 새로운 종목만 선별해주세요.")
+            if rotate:
+                lines.append("기존 종목 중 모멘텀을 잃은 종목은 drops에, 신규 유망 종목은 picks에 넣어주세요.")
+            else:
+                lines.append("이미 감시 중인 종목은 제외하고 새로운 종목만 선별해주세요.")
         lines.append("\n위 데이터를 분석하여 단기 매매에 유망한 미국 종목을 선별해주세요.")
         prompt = "\n".join(lines)
 
         try:
+            sys_prompt = ROTATE_SYSTEM_PROMPT if rotate else SCAN_SYSTEM_PROMPT
             response = self._call_ai(prompt)
             picks = self._parse_scan_response(response)
+            if rotate:
+                self.last_drops = self._parse_drops(response)
         except Exception as e:
             logger.error("AI US 종목 스캔 실패: %s", e)
             return []
@@ -216,8 +248,56 @@ class StockScanner:
         lines.append("\n위 데이터를 분석하여 단기 매매에 유망한 종목을 선별해주세요.")
         return "\n".join(lines)
 
+    def _build_rotate_prompt(self, volume_rank: list[dict], current_watchlist: list[str]) -> str:
+        """로테이션용 프롬프트 — 기존 종목 재평가 + 신규 추천."""
+        lines = ["[거래량 상위 20 종목]"]
+        lines.append("종목코드 | 종목명 | 현재가 | 등락률 | 거래량 | 거래대금")
+        lines.append("-" * 80)
+        for item in volume_rank:
+            lines.append(
+                f"{item['symbol']} | {item['name']} | "
+                f"{item['price']} | {item['change_pct']}% | "
+                f"{item['volume']} | {item['amount']}"
+            )
+
+        if current_watchlist:
+            lines.append(f"\n[현재 감시 중인 종목]: {', '.join(current_watchlist)}")
+            lines.append("기존 종목 중 모멘텀을 잃었거나 거래량이 급감한 종목은 drops에 넣어주세요.")
+            lines.append("거래량 상위에서 신규 유망 종목은 picks에 넣어주세요.")
+        else:
+            lines.append("\n감시 종목이 없습니다. 신규 유망 종목을 picks에 넣어주세요.")
+
+        lines.append("\n위 데이터를 분석하여 종목 교체 판단을 내려주세요.")
+        return "\n".join(lines)
+
+    def _parse_drops(self, text: str) -> list[str]:
+        """AI 응답에서 제거 대상 종목을 파싱한다."""
+        try:
+            cleaned = text.strip()
+            if "```" in cleaned:
+                start = cleaned.find("{")
+                end = cleaned.rfind("}") + 1
+                cleaned = cleaned[start:end]
+            data = json.loads(cleaned)
+            return data.get("drops", [])
+        except (json.JSONDecodeError, KeyError):
+            return []
+
     def _call_ai(self, prompt: str) -> str:
-        """AI API를 호출한다."""
+        """AI API를 호출한다 (429 재시도 포함)."""
+        delays = [10, 30, 60]
+        for attempt in range(3):
+            try:
+                return self._call_ai_once(prompt)
+            except Exception as e:
+                if "429" in str(e) and attempt < 2:
+                    logger.warning("AI API 429 rate limit — %d초 후 재시도 (%d/3)", delays[attempt], attempt + 1)
+                    time.sleep(delays[attempt])
+                else:
+                    raise
+
+    def _call_ai_once(self, prompt: str) -> str:
+        """AI API 1회 호출."""
         if self.ai_provider == "gemini":
             from google import genai
             from google.genai import types

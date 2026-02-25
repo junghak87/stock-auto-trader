@@ -411,6 +411,15 @@ class Database:
         if count > 0:
             logger.info("AI 스캔 종목 초기화: %d개 비활성화 (market=%s)", count, market or "ALL")
 
+    def get_ai_watchlist(self, market: str) -> list[str]:
+        """AI가 추가한 활성 종목만 조회한다."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol FROM watchlist WHERE market=? AND source='ai_scan' AND active=1",
+                (market,),
+            ).fetchall()
+        return [r["symbol"] for r in rows]
+
     def sync_watchlist_from_config(self, kr_stocks: list[str], us_stocks: list[str]):
         """설정 파일의 종목을 watchlist와 동기화한다.
 

@@ -446,11 +446,16 @@ class KISClient:
         """국내 주식 매수 주문.
 
         Args:
-            price: 0이면 시장가 주문
+            price: 0이면 시장가 주문 (모의투자 시 현재가 지정가로 자동 변환)
         """
         acct_prefix = self.account_no.split("-")[0]
         acct_suffix = self.account_no.split("-")[1] if "-" in self.account_no else "01"
-        order_type = "01" if price > 0 else "06"  # 01=지정가, 06=시장가
+
+        # 모의투자는 시장가(06) 미지원 → 현재가 지정가로 변환
+        if price <= 0 and not self.is_live:
+            price = int(self.get_kr_price(symbol).price)
+            logger.info("모의투자 시장가→지정가 변환: %s %d원", symbol, price)
+        order_type = "01" if price > 0 else "06"
 
         body = {
             "CANO": acct_prefix,
@@ -468,6 +473,11 @@ class KISClient:
         """국내 주식 매도 주문."""
         acct_prefix = self.account_no.split("-")[0]
         acct_suffix = self.account_no.split("-")[1] if "-" in self.account_no else "01"
+
+        # 모의투자는 시장가(06) 미지원 → 현재가 지정가로 변환
+        if price <= 0 and not self.is_live:
+            price = int(self.get_kr_price(symbol).price)
+            logger.info("모의투자 시장가→지정가 변환: %s %d원", symbol, price)
         order_type = "01" if price > 0 else "06"
 
         body = {
@@ -523,7 +533,12 @@ class KISClient:
             _, exchange = self.detect_exchange(symbol)
         acct_prefix = self.account_no.split("-")[0]
         acct_suffix = self.account_no.split("-")[1] if "-" in self.account_no else "01"
-        order_type = "00" if price > 0 else "31"  # 00=지정가, 31=시장가(MOO 아님, LOO)
+
+        # 모의투자는 시장가 미지원 → 현재가 지정가로 변환
+        if price <= 0 and not self.is_live:
+            price = self.get_us_price(symbol).price
+            logger.info("모의투자 US 시장가→지정가 변환: %s $%.2f", symbol, price)
+        order_type = "00" if price > 0 else "31"
 
         body = {
             "CANO": acct_prefix,
@@ -544,6 +559,11 @@ class KISClient:
             _, exchange = self.detect_exchange(symbol)
         acct_prefix = self.account_no.split("-")[0]
         acct_suffix = self.account_no.split("-")[1] if "-" in self.account_no else "01"
+
+        # 모의투자는 시장가 미지원 → 현재가 지정가로 변환
+        if price <= 0 and not self.is_live:
+            price = self.get_us_price(symbol).price
+            logger.info("모의투자 US 시장가→지정가 변환: %s $%.2f", symbol, price)
         order_type = "00" if price > 0 else "31"
 
         body = {

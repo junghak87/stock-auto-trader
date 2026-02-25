@@ -69,7 +69,7 @@ class TradingJobs:
         for symbol in kr_stocks:
             try:
                 price = self.kis.get_kr_price(symbol)
-                logger.info("[%s] %s: %,.0f원 (%+.1f%%)", symbol, price.name, price.price, price.change_pct)
+                logger.info("[%s] %s: %.0f원 (%+.1f%%)", symbol, price.name, price.price, price.change_pct)
                 time.sleep(self.rate_delay)
             except Exception as e:
                 logger.error("[%s] 시세 조회 실패: %s", symbol, e)
@@ -215,19 +215,87 @@ class TradingJobs:
 
     # ── 해외 장 작업 ──────────────────────────────────────
 
-    def job_kr_midday_scan(self):
-        """장중 AI 추가 스캔 (11:00, 13:30) — 기존 watchlist 유지하며 추가만."""
+    def job_kr_watchlist_rotate(self):
+        """장중 종목 로테이션 (매 2시간) — 모멘텀 잃은 종목 교체."""
         if not self.scanner:
             return
-        logger.info("--- 국내 장중 AI 추가 스캔 ---")
+        logger.info("--- 국내 종목 로테이션 ---")
+
+        # 보유 종목 조회 (보호 대상)
+        held_symbols: set[str] = set()
         try:
-            picks = self.scanner.scan_and_select()
-            if picks:
-                names = ", ".join(f"{p['symbol']}" for p in picks)
-                self.notifier.notify_system(f"장중 AI 스캔 추가: {names}")
-                logger.info("장중 스캔 %d개 종목 추가", len(picks))
+            positions = self.kis.get_kr_balance()
+            held_symbols = {p.symbol for p in positions if p.qty > 0}
+            if held_symbols:
+                logger.info("보유 종목 (보호): %s", ", ".join(held_symbols))
         except Exception as e:
-            logger.error("장중 AI 스캔 실패: %s", e)
+            logger.warning("보유 종목 조회 실패 — 로테이션 계속: %s", e)
+
+        try:
+            picks = self.scanner.scan_and_select(rotate=True)
+            drops = self.scanner.last_drops
+
+            # 비보유 종목만 제거
+            removed = []
+            for symbol in drops:
+                if symbol not in held_symbols:
+                    self.db.remove_watchlist(symbol, "KR")
+                    removed.append(symbol)
+                else:
+                    logger.info("[%s] 보유 중 — 제거 보호", symbol)
+
+            msg_parts = []
+            if picks:
+                names = ", ".join(p["symbol"] for p in picks)
+                msg_parts.append(f"+{len(picks)} ({names})")
+            if removed:
+                msg_parts.append(f"-{len(removed)} ({', '.join(removed)})")
+            if msg_parts:
+                self.notifier.notify_system(f"종목 로테이션: {' / '.join(msg_parts)}")
+            else:
+                logger.info("로테이션 결과: 변경 없음")
+        except Exception as e:
+            logger.error("종목 로테이션 실패: %s", e)
+
+    def job_us_watchlist_rotate(self):
+        """해외 장중 종목 로테이션 (매 2시간)."""
+        if not self.scanner:
+            return
+        logger.info("--- 해외 종목 로테이션 ---")
+
+        held_symbols: set[str] = set()
+        try:
+            positions = self.kis.get_us_balance()
+            held_symbols = {p.symbol for p in positions if p.qty > 0}
+            if held_symbols:
+                logger.info("보유 종목 (보호): %s", ", ".join(held_symbols))
+        except Exception as e:
+            logger.warning("보유 종목 조회 실패 — 로테이션 계속: %s", e)
+
+        try:
+            picks = self.scanner.scan_us_and_select(rotate=True)
+            drops = self.scanner.last_drops
+
+            removed = []
+            for symbol in drops:
+                if symbol not in held_symbols:
+                    self.db.remove_watchlist(symbol, "US")
+                    removed.append(symbol)
+                else:
+                    logger.info("[%s] 보유 중 — 제거 보호", symbol)
+
+            msg_parts = []
+            if picks:
+                names = ", ".join(p["symbol"] for p in picks)
+                msg_parts.append(f"+{len(picks)} ({names})")
+            if removed:
+                msg_parts.append(f"-{len(removed)} ({', '.join(removed)})")
+            if msg_parts:
+                self.notifier.notify_system(f"US 종목 로테이션: {' / '.join(msg_parts)}")
+            else:
+                logger.info("US 로테이션 결과: 변경 없음")
+        except Exception as e:
+            logger.error("해외 종목 로테이션 실패: %s", e)
 
     def job_us_market_open(self):
         """해외 장 시작 준비 (23:20)."""

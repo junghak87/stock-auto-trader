@@ -6,6 +6,7 @@ Google Gemini(무료), Claude, OpenAI API를 활용하여
 
 import json
 import logging
+import time
 
 import pandas as pd
 import ta
@@ -185,15 +186,26 @@ class AIStrategy(BaseStrategy):
     # ── AI API 호출 ───────────────────────────────────────
 
     def _call_ai(self, prompt: str) -> str:
-        """설정된 provider에 따라 AI API를 호출한다."""
-        if self.provider == "gemini":
-            return self._call_gemini(prompt)
-        elif self.provider == "claude":
-            return self._call_claude(prompt)
-        elif self.provider == "openai":
-            return self._call_openai(prompt)
-        else:
+        """설정된 provider에 따라 AI API를 호출한다 (429 재시도 포함)."""
+        providers = {
+            "gemini": self._call_gemini,
+            "claude": self._call_claude,
+            "openai": self._call_openai,
+        }
+        call_fn = providers.get(self.provider)
+        if not call_fn:
             raise ValueError(f"지원하지 않는 AI provider: {self.provider}")
+
+        delays = [10, 30, 60]
+        for attempt in range(3):
+            try:
+                return call_fn(prompt)
+            except Exception as e:
+                if "429" in str(e) and attempt < 2:
+                    logger.warning("AI API 429 rate limit — %d초 후 재시도 (%d/3)", delays[attempt], attempt + 1)
+                    time.sleep(delays[attempt])
+                else:
+                    raise
 
     def _call_gemini(self, prompt: str) -> str:
         """Google Gemini API를 호출한다."""

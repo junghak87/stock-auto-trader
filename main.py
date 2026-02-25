@@ -192,14 +192,10 @@ def setup_scheduler(jobs: TradingJobs) -> BackgroundScheduler:
         CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/3"),
     )
 
-    # 장중 AI 추가 스캔: 11:00, 13:30 (거래량 변동이 큰 시간대)
+    # 장중 종목 로테이션: 09:30, 11:30, 13:30 (매 2시간)
     scheduler.add_job(
-        jobs.job_kr_midday_scan,
-        CronTrigger(day_of_week="mon-fri", hour=11, minute=0),
-    )
-    scheduler.add_job(
-        jobs.job_kr_midday_scan,
-        CronTrigger(day_of_week="mon-fri", hour=13, minute=30),
+        jobs.job_kr_watchlist_rotate,
+        CronTrigger(day_of_week="mon-fri", hour="9,11,13", minute=30),
     )
 
     # 장 마감 정산: 15:40
@@ -229,6 +225,12 @@ def setup_scheduler(jobs: TradingJobs) -> BackgroundScheduler:
         CronTrigger(day_of_week="tue-sat", hour="0-5", minute="5,10,20,25,35,40,50,55"),
     )
 
+    # 미국장 종목 로테이션: 01:30, 03:30 (매 2시간)
+    scheduler.add_job(
+        jobs.job_us_watchlist_rotate,
+        CronTrigger(day_of_week="tue-sat", hour="1,3", minute=30),
+    )
+
     # 미국장 마감: 06:10 (화~토)
     scheduler.add_job(jobs.job_us_market_close, CronTrigger(day_of_week="tue-sat", hour=6, minute=10))
 
@@ -238,6 +240,11 @@ def setup_scheduler(jobs: TradingJobs) -> BackgroundScheduler:
 def run_once(jobs: TradingJobs):
     """1회 전략 실행 후 종료 (테스트/디버깅용)."""
     logger.info("=== 1회 전략 실행 모드 ===")
+
+    # 스캔 먼저 실행 (watchlist가 비어 있을 수 있으므로)
+    if jobs.scanner:
+        logger.info("종목 스캔 실행 중...")
+        jobs.job_kr_market_open()
 
     now = datetime.now()
     hour = now.hour
@@ -309,6 +316,22 @@ def main():
     scheduler = setup_scheduler(jobs)
     scheduler.start()
     notifier.notify_system(f"자동매매 시스템 시작 [{mode_str} 모드]")
+
+    # 서비스 시작 시 초기 스캔 (장중 시작 시 watchlist가 비어있는 문제 방지)
+    now = datetime.now()
+    if jobs.scanner:
+        if 9 <= now.hour < 16:
+            logger.info("장중 서비스 시작 — 초기 종목 스캔 실행")
+            try:
+                jobs.job_kr_market_open()
+            except Exception as e:
+                logger.error("초기 국내 스캔 실패: %s", e)
+        elif now.hour >= 23 or now.hour < 6:
+            logger.info("해외장 서비스 시작 — 초기 종목 스캔 실행")
+            try:
+                jobs.job_us_market_open()
+            except Exception as e:
+                logger.error("초기 해외 스캔 실패: %s", e)
 
     logger.info("스케줄러 실행 중... Ctrl+C로 종료")
 
