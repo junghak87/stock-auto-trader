@@ -7,7 +7,7 @@
 import logging
 import time
 
-from core.kis_client import KISClient
+from core.broker import BrokerClient
 from core.database import Database
 from core.telegram_bot import TelegramNotifier
 from strategies.base import BaseStrategy, Signal
@@ -24,7 +24,7 @@ class TradingJobs:
 
     def __init__(
         self,
-        kis_client: KISClient,
+        kis_client: BrokerClient,
         database: Database,
         notifier: TelegramNotifier,
         executor: TradingExecutor,
@@ -32,8 +32,10 @@ class TradingJobs:
         strategy: BaseStrategy,
         scanner: StockScanner | None = None,
         tail_strategy: TailTradingStrategy | None = None,
+        quote_client: BrokerClient | None = None,
     ):
         self.kis = kis_client
+        self.quote = quote_client or kis_client  # 시세 조회 전용 클라이언트
         self.db = database
         self.notifier = notifier
         self.executor = executor
@@ -43,6 +45,7 @@ class TradingJobs:
         self.tail_strategy = tail_strategy
         # 실전 20req/s(0.08s), 모의 5req/s(0.25s)
         self.rate_delay = 0.08 if kis_client.is_live else 0.25
+        self.quote_rate_delay = 0.08 if self.quote.is_live else 0.25
 
     # ── 국내 장 작업 ──────────────────────────────────────
 
@@ -68,9 +71,9 @@ class TradingJobs:
         kr_stocks = self._get_kr_stocks()
         for symbol in kr_stocks:
             try:
-                price = self.kis.get_kr_price(symbol)
+                price = self.quote.get_kr_price(symbol)
                 logger.info("[%s] %s: %.0f원 (%+.1f%%)", symbol, price.name, price.price, price.change_pct)
-                time.sleep(self.rate_delay)
+                time.sleep(self.quote_rate_delay)
             except Exception as e:
                 logger.error("[%s] 시세 조회 실패: %s", symbol, e)
 
@@ -93,9 +96,9 @@ class TradingJobs:
         lines = ["[시장 지수]"]
         for code, name in [("0001", "KOSPI"), ("1001", "KOSDAQ")]:
             try:
-                idx = self.kis.get_kr_index(code)
+                idx = self.quote.get_kr_index(code)
                 lines.append(f"{name}: {idx['price']:,.2f} ({idx['change_pct']:+.2f}%)")
-                time.sleep(self.rate_delay)
+                time.sleep(self.quote_rate_delay)
             except Exception as e:
                 logger.debug("%s 지수 조회 실패: %s", name, e)
         return "\n".join(lines) if len(lines) > 1 else ""
@@ -112,11 +115,11 @@ class TradingJobs:
 
         for symbol in self._get_kr_stocks():
             try:
-                # 일봉 데이터 조회
-                ohlcv = self.kis.get_kr_daily_prices(symbol, count=60)
+                # 일봉 데이터 조회 (시세 조회 클라이언트 사용)
+                ohlcv = self.quote.get_kr_daily_prices(symbol, count=60)
                 if not ohlcv:
                     continue
-                time.sleep(self.rate_delay)
+                time.sleep(self.quote_rate_delay)
 
                 # DataFrame 변환 후 전략 분석
                 df = self.strategy.ohlcv_to_dataframe(ohlcv)
@@ -131,7 +134,7 @@ class TradingJobs:
                 if result.signal != Signal.HOLD and result.strength >= 0.3:
                     self.executor.execute_signal(symbol, "KR", result)
 
-                time.sleep(self.rate_delay)
+                time.sleep(self.quote_rate_delay)
             except Exception as e:
                 logger.error("[%s] 전략 실행 실패: %s", symbol, e)
 
@@ -150,10 +153,10 @@ class TradingJobs:
                 if not self.tail_strategy.is_cooled_down(symbol):
                     continue
 
-                # 1분봉 30개 조회
-                minute_data = self.kis.get_kr_minute_prices(symbol)
+                # 1분봉 30개 조회 (시세 조회 클라이언트 사용)
+                minute_data = self.quote.get_kr_minute_prices(symbol)
                 if not minute_data or len(minute_data) < 10:
-                    time.sleep(self.rate_delay)
+                    time.sleep(self.quote_rate_delay)
                     continue
 
                 # DataFrame 변환 → 5분봉 집계
@@ -161,7 +164,7 @@ class TradingJobs:
                 df_5min = self.tail_strategy.aggregate_to_5min(df_1min)
 
                 if len(df_5min) < 3:
-                    time.sleep(self.rate_delay)
+                    time.sleep(self.quote_rate_delay)
                     continue
 
                 result = self.tail_strategy.analyze(df_5min)
@@ -172,7 +175,7 @@ class TradingJobs:
                     self.executor.execute_signal(symbol, "KR", result)
                     self.tail_strategy.mark_signal(symbol)
 
-                time.sleep(self.rate_delay)
+                time.sleep(self.quote_rate_delay)
             except Exception as e:
                 logger.error("[%s] 꼬리 매매 실패: %s", symbol, e)
 
@@ -307,9 +310,9 @@ class TradingJobs:
         us_stocks = self._get_us_stocks()
         for symbol in us_stocks:
             try:
-                price = self.kis.get_us_price(symbol)
+                price = self.quote.get_us_price(symbol)
                 logger.info("[%s] %s: $%.2f (%+.1f%%)", symbol, price.name, price.price, price.change_pct)
-                time.sleep(self.rate_delay)
+                time.sleep(self.quote_rate_delay)
             except Exception as e:
                 logger.error("[%s] 해외 시세 조회 실패: %s", symbol, e)
 
@@ -333,10 +336,10 @@ class TradingJobs:
 
         for symbol in self._get_us_stocks():
             try:
-                ohlcv = self.kis.get_us_daily_prices(symbol, count=60)
+                ohlcv = self.quote.get_us_daily_prices(symbol, count=60)
                 if not ohlcv:
                     continue
-                time.sleep(self.rate_delay)
+                time.sleep(self.quote_rate_delay)
 
                 df = self.strategy.ohlcv_to_dataframe(ohlcv)
                 result = self.strategy.analyze(df)
@@ -349,7 +352,7 @@ class TradingJobs:
                 if result.signal != Signal.HOLD and result.strength >= 0.3:
                     self.executor.execute_signal(symbol, "US", result)
 
-                time.sleep(self.rate_delay)
+                time.sleep(self.quote_rate_delay)
             except Exception as e:
                 logger.error("[%s] 해외 전략 실행 실패: %s", symbol, e)
 

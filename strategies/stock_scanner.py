@@ -9,13 +9,10 @@ import logging
 import time
 import traceback
 
-from core.kis_client import KISClient
+from core.broker import BrokerClient
 from core.database import Database
 
 logger = logging.getLogger(__name__)
-
-# 거래량 상위 종목 조회 TR_ID
-TR_VOLUME_RANK = "FHPST01710000"
 
 SCAN_SYSTEM_PROMPT = """당신은 주식 종목 선별 전문가입니다.
 거래량 상위 종목과 급등/급락 종목 데이터를 분석하여 매매에 유망한 종목을 선별해주세요.
@@ -53,14 +50,16 @@ class StockScanner:
 
     def __init__(
         self,
-        kis_client: KISClient,
+        kis_client: BrokerClient,
         database: Database,
         ai_provider: str = "gemini",
         ai_api_key: str = "",
         ai_model: str = "",
         budget_per_stock: float = 0,
+        quote_client: BrokerClient | None = None,
     ):
         self.kis = kis_client
+        self.quote = quote_client or kis_client  # 시세 조회 전용 클라이언트
         self.db = database
         self.ai_provider = ai_provider
         self.ai_api_key = ai_api_key
@@ -72,34 +71,7 @@ class StockScanner:
     def scan_kr_volume_rank(self) -> list[dict]:
         """국내 거래량 상위 종목을 조회한다."""
         try:
-            data = self.kis._get(
-                "/uapi/domestic-stock/v1/quotations/volume-rank",
-                TR_VOLUME_RANK,
-                params={
-                    "FID_COND_MRKT_DIV_CODE": "J",
-                    "FID_COND_SCR_DIV_CODE": "20101",
-                    "FID_INPUT_ISCD": "0000",
-                    "FID_DIV_CLS_CODE": "0",
-                    "FID_BLNG_CLS_CODE": "0",
-                    "FID_TRGT_CLS_CODE": "111111111",
-                    "FID_TRGT_EXLS_CLS_CODE": "000000",
-                    "FID_INPUT_PRICE_1": "0",
-                    "FID_INPUT_PRICE_2": "0",
-                    "FID_VOL_CNT": "0",
-                    "FID_INPUT_DATE_1": "",
-                },
-            )
-            results = []
-            for item in data.get("output", [])[:20]:
-                results.append({
-                    "symbol": item.get("mksc_shrn_iscd", ""),
-                    "name": item.get("hts_kor_isnm", ""),
-                    "price": item.get("stck_prpr", "0"),
-                    "change_pct": item.get("prdy_ctrt", "0"),
-                    "volume": item.get("acml_vol", "0"),
-                    "amount": item.get("acml_tr_pbmn", "0"),
-                })
-            return results
+            return self.quote.get_kr_volume_rank(count=20)
         except Exception as e:
             logger.error("거래량 상위 종목 조회 실패: %s", e)
             return []
@@ -126,7 +98,7 @@ class StockScanner:
             ]
             filtered = before - len(volume_rank)
             if filtered > 0:
-                logger.info("예산 필터: %d개 종목 제외 (종목당 한도: %,.0f원)", filtered, self.budget_per_stock)
+                logger.info("예산 필터: %d개 종목 제외 (종목당 한도: %s원)", filtered, f"{self.budget_per_stock:,.0f}")
 
         if not volume_rank:
             logger.info("예산 내 매수 가능 종목 없음 -- 스캔 스킵")
@@ -178,7 +150,7 @@ class StockScanner:
 
         for symbol in candidates:
             try:
-                price = self.kis.get_us_price(symbol)
+                price = self.quote.get_us_price(symbol)
                 us_data.append({
                     "symbol": symbol,
                     "name": price.name,
@@ -186,7 +158,7 @@ class StockScanner:
                     "change_pct": f"{price.change_pct:.2f}",
                     "volume": str(price.volume),
                 })
-                time.sleep(0.08 if self.kis.is_live else 0.25)
+                time.sleep(0.08 if self.quote.is_live else 0.25)
             except Exception as e:
                 logger.debug("US 시세 조회 실패 [%s]: %s", symbol, e)
 

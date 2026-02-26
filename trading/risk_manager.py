@@ -12,7 +12,7 @@ from datetime import datetime
 import pandas as pd
 import ta
 
-from core.kis_client import KISClient, Position
+from core.broker import BrokerClient, Position
 from core.database import Database
 
 logger = logging.getLogger(__name__)
@@ -27,9 +27,8 @@ class RiskManager:
 
     def __init__(
         self,
-        kis_client: KISClient,
+        kis_client: BrokerClient,
         database: Database,
-        max_position_ratio: float = 0.25,
         stop_loss_pct: float = 5.0,
         take_profit_pct: float = 10.0,
         trailing_activation_pct: float = 3.0,
@@ -43,7 +42,6 @@ class RiskManager:
     ):
         self.kis = kis_client
         self.db = database
-        self.max_position_ratio = max_position_ratio
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
         self.trailing_activation_pct = trailing_activation_pct
@@ -149,6 +147,19 @@ class RiskManager:
         self._cash_cache_time = now
         return self._cash_cache
 
+    @staticmethod
+    def _calc_max_stocks(budget: float) -> int:
+        """투자금 규모에 따른 최대 보유 종목 수."""
+        if budget < 10_000_000:
+            return 2
+        if budget < 30_000_000:
+            return 3
+        if budget < 50_000_000:
+            return 5
+        if budget < 100_000_000:
+            return 7
+        return 10
+
     def calculate_buy_qty(self, symbol: str, price: float, market: str = "KR") -> int:
         """매수 가능 수량을 계산한다 (총 예산 또는 계좌 평가액 기반)."""
         try:
@@ -167,7 +178,9 @@ class RiskManager:
             if base_amount <= 0:
                 return 0
 
-            max_invest = base_amount * self.max_position_ratio
+            # 투자금 규모별 자동 종목수 산정 → 종목당 투자금 계산
+            max_stocks = self._calc_max_stocks(base_amount)
+            max_invest = base_amount / max_stocks
             max_by_cash = available_cash * 0.95  # 현금의 95%까지만 사용
             invest_amount = min(max_invest, max_by_cash)
 
@@ -176,8 +189,8 @@ class RiskManager:
                 invest_usd = invest_amount / self.usd_krw_rate
                 qty = int(invest_usd / price)
                 logger.info(
-                    "매수 수량 계산: %s | 기준액=%s원, 종목한도=$%.0f (환율:%,.0f), 가격=$%.2f -> %d주",
-                    symbol, f"{base_amount:,.0f}", invest_usd, self.usd_krw_rate, price, qty,
+                    "매수 수량 계산: %s | 기준액=%s원, 종목한도=$%.0f (환율:%s), 가격=$%.2f -> %d주",
+                    symbol, f"{base_amount:,.0f}", invest_usd, f"{self.usd_krw_rate:,.0f}", price, qty,
                 )
             else:
                 qty = int(invest_amount / price)
@@ -258,8 +271,8 @@ class RiskManager:
                 self._high_watermarks[pos.symbol] = pos.current_price
                 if prev_high > 0:
                     logger.debug(
-                        "고점 갱신: %s | %,.2f → %,.2f",
-                        pos.symbol, prev_high, pos.current_price,
+                        "고점 갱신: %s | %s → %s",
+                        pos.symbol, f"{prev_high:,.2f}", f"{pos.current_price:,.2f}",
                     )
 
     def check_take_profit(self, positions: list[Position]) -> list[Position]:
@@ -292,18 +305,18 @@ class RiskManager:
                 drop_from_high = (high - pos.current_price) / high * 100
                 if drop_from_high >= self.trailing_stop_pct:
                     logger.info(
-                        "트레일링 스탑: %s %s | 수익률: %.1f%%, 고점: %,.2f, "
-                        "현재: %,.2f, 고점대비: -%.1f%% (기준: -%.1f%%)",
-                        pos.symbol, pos.name, pos.pnl_pct, high,
-                        pos.current_price, drop_from_high, self.trailing_stop_pct,
+                        "트레일링 스탑: %s %s | 수익률: %.1f%%, 고점: %s, "
+                        "현재: %s, 고점대비: -%.1f%% (기준: -%.1f%%)",
+                        pos.symbol, pos.name, pos.pnl_pct, f"{high:,.2f}",
+                        f"{pos.current_price:,.2f}", drop_from_high, self.trailing_stop_pct,
                     )
                     profit_targets.append(pos)
                 else:
                     logger.debug(
-                        "트레일링 활성: %s | 수익률: %.1f%%, 고점: %,.2f, "
-                        "현재: %,.2f, 고점대비: -%.1f%%",
-                        pos.symbol, pos.pnl_pct, high,
-                        pos.current_price, drop_from_high,
+                        "트레일링 활성: %s | 수익률: %.1f%%, 고점: %s, "
+                        "현재: %s, 고점대비: -%.1f%%",
+                        pos.symbol, pos.pnl_pct, f"{high:,.2f}",
+                        f"{pos.current_price:,.2f}", drop_from_high,
                     )
         return profit_targets
 

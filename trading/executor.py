@@ -7,7 +7,7 @@
 import logging
 from datetime import datetime
 
-from core.kis_client import KISClient, OrderResult
+from core.broker import BrokerClient, OrderResult
 from core.database import Database
 from core.telegram_bot import TelegramNotifier
 from strategies.base import Signal, StrategyResult
@@ -27,12 +27,14 @@ class TradingExecutor:
 
     def __init__(
         self,
-        kis_client: KISClient,
+        kis_client: BrokerClient,
         database: Database,
         notifier: TelegramNotifier,
         risk_manager: RiskManager,
+        quote_client: BrokerClient | None = None,
     ):
         self.kis = kis_client
+        self.quote = quote_client or kis_client  # 시세 조회 전용 클라이언트
         self.db = database
         self.notifier = notifier
         self.risk = risk_manager
@@ -114,7 +116,7 @@ class TradingExecutor:
         """매수 주문을 실행한다 (이미 보유 중이면 스킵)."""
         try:
             if market == "KR":
-                price_info = self.kis.get_kr_price(symbol)
+                price_info = self.quote.get_kr_price(symbol)
                 price = price_info.price
                 qty = self.risk.calculate_buy_qty(symbol, price, market)
                 if qty <= 0:
@@ -150,7 +152,7 @@ class TradingExecutor:
                     }
             else:
                 # US
-                price_info = self.kis.get_us_price(symbol)
+                price_info = self.quote.get_us_price(symbol)
                 price = price_info.price
                 qty = self.risk.calculate_buy_qty(symbol, price, market)
                 if qty <= 0:
@@ -173,40 +175,9 @@ class TradingExecutor:
             return None
 
     def _get_us_positions_single(self, exchange: str) -> list:
-        """단일 거래소의 US 잔고만 조회한다 (API 호출 절약)."""
+        """US 잔고를 조회한다 (exchange 파라미터는 호환성을 위해 남겨둠)."""
         try:
-            acct_prefix = self.kis.account_no.split("-")[0]
-            acct_suffix = self.kis.account_no.split("-")[1] if "-" in self.kis.account_no else "01"
-            tr_id = self.kis._tr("us_balance")
-            data = self.kis._get(
-                "/uapi/overseas-stock/v1/trading/inquire-balance",
-                tr_id,
-                params={
-                    "CANO": acct_prefix,
-                    "ACNT_PRDT_CD": acct_suffix,
-                    "OVRS_EXCG_CD": exchange,
-                    "TR_CRCY_CD": "USD",
-                    "CTX_AREA_FK200": "",
-                    "CTX_AREA_NK200": "",
-                },
-            )
-            from core.kis_client import Position
-            positions = []
-            for item in data.get("output1", []):
-                qty = int(item.get("ovrs_cblc_qty", 0))
-                if qty == 0:
-                    continue
-                positions.append(Position(
-                    symbol=item.get("ovrs_pdno", ""),
-                    name=item.get("ovrs_item_name", ""),
-                    qty=qty,
-                    avg_price=float(item.get("pchs_avg_pric", 0)),
-                    current_price=float(item.get("now_pric2", item.get("ovrs_now_pric", 0))),
-                    pnl=float(item.get("frcr_evlu_pfls_amt", 0)),
-                    pnl_pct=float(item.get("evlu_pfls_rt", 0)),
-                    market="US",
-                ))
-            return positions
+            return self.kis.get_us_balance()
         except Exception:
             return []
 
@@ -267,7 +238,7 @@ class TradingExecutor:
 
             # 지정가 익절 (KR만, 현재가 대비 +offset%, 모의투자: offset=0 즉시 체결)
             if market == "KR" and self.limit_order_enabled:
-                price_info = self.kis.get_kr_price(symbol)
+                price_info = self.quote.get_kr_price(symbol)
                 tp_offset = 0 if not self.kis.is_live else self.limit_tp_offset_pct
                 limit_price = self._round_kr_tick(int(price_info.price * (1 + tp_offset / 100)))
                 order = self.kis.sell_kr(symbol, sell_qty, price=limit_price)
@@ -301,9 +272,9 @@ class TradingExecutor:
 
         try:
             if market == "KR":
-                price_info = self.kis.get_kr_price(symbol)
+                price_info = self.quote.get_kr_price(symbol)
             else:
-                price_info = self.kis.get_us_price(symbol)
+                price_info = self.quote.get_us_price(symbol)
             current_price = price_info.price
 
             dip_threshold = stage_info["first_buy_price"] * (1 - self.split_buy_dip_pct / 100)
@@ -314,8 +285,8 @@ class TradingExecutor:
             full_qty = self.risk.calculate_buy_qty(symbol, current_price, market)
             add_qty = max(1, int(full_qty * remaining_ratio))
 
-            logger.info("분할 매수 2단계: %s | 1차가: %,.0f → 현재: %,.0f (-%,.1f%%), 추가 %d주",
-                         symbol, stage_info["first_buy_price"], current_price,
+            logger.info("분할 매수 2단계: %s | 1차가: %s → 현재: %s (-%.1f%%), 추가 %d주",
+                         symbol, f"{stage_info['first_buy_price']:,.0f}", f"{current_price:,.0f}",
                          (1 - current_price / stage_info["first_buy_price"]) * 100, add_qty)
 
             if market == "KR":
@@ -376,9 +347,9 @@ class TradingExecutor:
         if order.success and order.price == 0:
             try:
                 if market == "KR":
-                    p = self.kis.get_kr_price(order.symbol)
+                    p = self.quote.get_kr_price(order.symbol)
                 else:
-                    p = self.kis.get_us_price(order.symbol)
+                    p = self.quote.get_us_price(order.symbol)
                 actual_price = p.price
             except Exception:
                 pass

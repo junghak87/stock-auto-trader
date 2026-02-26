@@ -4,16 +4,34 @@ from pydantic_settings import BaseSettings
 from pydantic import Field
 
 
+class BrokerSettings(BaseSettings):
+    """증권사 선택 설정."""
+
+    broker: str = Field(default="kis", alias="BROKER")  # "kis", "kiwoom", "hybrid"
+
+    model_config = {"env_file": ".env", "extra": "ignore"}
+
+
 class KISSettings(BaseSettings):
     """한국투자증권 API 설정."""
 
-    app_key: str = Field(alias="KIS_APP_KEY")
-    app_secret: str = Field(alias="KIS_APP_SECRET")
-    account_no: str = Field(alias="KIS_ACCOUNT_NO")
+    app_key: str = Field(default="", alias="KIS_APP_KEY")
+    app_secret: str = Field(default="", alias="KIS_APP_SECRET")
+    account_no: str = Field(default="", alias="KIS_ACCOUNT_NO")
 
     paper_app_key: str = Field(default="", alias="KIS_PAPER_APP_KEY")
     paper_app_secret: str = Field(default="", alias="KIS_PAPER_APP_SECRET")
     paper_account_no: str = Field(default="", alias="KIS_PAPER_ACCOUNT_NO")
+
+    model_config = {"env_file": ".env", "extra": "ignore"}
+
+
+class KiwoomSettings(BaseSettings):
+    """키움증권 API 설정."""
+
+    app_key: str = Field(default="", alias="KIWOOM_APP_KEY")
+    app_secret: str = Field(default="", alias="KIWOOM_APP_SECRET")
+    account_no: str = Field(default="", alias="KIWOOM_ACCOUNT_NO")
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
@@ -32,7 +50,6 @@ class TradingSettings(BaseSettings):
 
     mode: str = Field(default="paper", alias="TRADING_MODE")
     total_budget: float = Field(default=0, alias="TOTAL_BUDGET")
-    max_position_ratio: float = Field(default=0.25, alias="MAX_POSITION_RATIO")
     stop_loss_pct: float = Field(default=5.0, alias="STOP_LOSS_PCT")
     take_profit_pct: float = Field(default=10.0, alias="TAKE_PROFIT_PCT")
     trailing_activation_pct: float = Field(default=3.0, alias="TRAILING_ACTIVATION_PCT")
@@ -70,10 +87,26 @@ class TradingSettings(BaseSettings):
         return self.mode == "live"
 
     @property
+    def max_stocks(self) -> int:
+        """투자금 규모에 따른 최대 보유 종목 수를 반환한다."""
+        b = self.total_budget
+        if b <= 0:
+            return 5
+        if b < 10_000_000:       # 1천만 미만: 2종목
+            return 2
+        if b < 30_000_000:       # 3천만 미만: 3종목
+            return 3
+        if b < 50_000_000:       # 5천만 미만: 5종목
+            return 5
+        if b < 100_000_000:      # 1억 미만: 7종목
+            return 7
+        return 10                # 1억 이상: 10종목
+
+    @property
     def budget_per_stock(self) -> float:
         """종목당 최대 투자 금액을 반환한다."""
         if self.total_budget > 0:
-            return self.total_budget * self.max_position_ratio
+            return self.total_budget / self.max_stocks
         return 0
 
 
@@ -109,7 +142,14 @@ class Settings:
     """전체 설정을 하나로 묶는 클래스."""
 
     def __init__(self):
+        self.broker_config = BrokerSettings()
         self.kis = KISSettings()
+        self.kiwoom = KiwoomSettings()
         self.telegram = TelegramSettings()
         self.trading = TradingSettings()
         self.ai = AISettings()
+
+    @property
+    def broker(self) -> str:
+        """선택된 증권사 이름 (kis / kiwoom)."""
+        return self.broker_config.broker.lower()

@@ -1,17 +1,17 @@
 """한국투자증권 API 클라이언트 래퍼 모듈.
 
-python-kis 라이브러리를 활용하여 국내/해외 주식 매매 및 시세 조회를 수행한다.
-REST API 직접 호출도 함께 지원하여 라이브러리 미지원 기능을 보완한다.
+REST API 직접 호출로 국내/해외 주식 매매 및 시세 조회를 수행한다.
 """
 
 import json
 import logging
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import requests
+
+from core.broker import StockPrice, OrderResult, Position, OHLCVData
 
 logger = logging.getLogger(__name__)
 
@@ -38,69 +38,13 @@ TR_IDS = {
     # 해외 주식
     "us_price": "HHDFS00000300",
     "us_daily_price": "HHDFS76240000",
-    "us_buy_live": "JTTT1002U",
-    "us_sell_live": "JTTT1006U",
+    "us_buy_live": "TTTT1002U",
+    "us_sell_live": "TTTT1006U",
     "us_buy_paper": "VTTT1002U",
-    "us_sell_paper": "VTTT1006U",
-    "us_balance_live": "JTTT3012R",
+    "us_sell_paper": "VTTT1001U",
+    "us_balance_live": "TTTT3012R",
     "us_balance_paper": "VTTT3012R",
 }
-
-
-@dataclass
-class StockPrice:
-    """주식 시세 정보."""
-
-    symbol: str
-    name: str
-    price: float
-    change: float
-    change_pct: float
-    volume: int
-    high: float
-    low: float
-    open: float
-    prev_close: float
-    market: str  # "KR" or "US"
-
-
-@dataclass
-class OrderResult:
-    """주문 결과."""
-
-    success: bool
-    order_no: str
-    message: str
-    symbol: str
-    side: str  # "buy" or "sell"
-    qty: int
-    price: float
-
-
-@dataclass
-class Position:
-    """보유 종목."""
-
-    symbol: str
-    name: str
-    qty: int
-    avg_price: float
-    current_price: float
-    pnl: float
-    pnl_pct: float
-    market: str
-
-
-@dataclass
-class OHLCVData:
-    """일봉 데이터."""
-
-    date: str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: int
 
 
 # 주요 NYSE 상장 종목 (거래소 자동 감지용)
@@ -130,6 +74,7 @@ class KISClient:
         self.app_secret = app_secret
         self.account_no = account_no
         self.is_live = is_live
+        self.supported_markets = ["KR", "US"]
         self.base_url = BASE_URL_LIVE if is_live else BASE_URL_PAPER
         self.access_token: str | None = None
         self.token_expires_at: float = 0
@@ -145,15 +90,24 @@ class KISClient:
 
     # ── 인증 ──────────────────────────────────────────────
 
+    def _cache_key(self) -> str:
+        """캐시 키 (live/paper 구분)."""
+        return "live" if self.is_live else "paper"
+
     def _load_or_issue_token(self):
         """캐시된 토큰을 로드하거나 새로 발급받는다."""
         if TOKEN_CACHE_FILE.exists():
             try:
-                cache = json.loads(TOKEN_CACHE_FILE.read_text(encoding="utf-8"))
-                if cache.get("is_live") == self.is_live and cache.get("expires_at", 0) > time.time() + 60:
+                all_cache = json.loads(TOKEN_CACHE_FILE.read_text(encoding="utf-8"))
+                # 하위호환: 기존 단일 토큰 형식 → 새 멀티 형식 변환
+                if "access_token" in all_cache and "is_live" in all_cache:
+                    key = "live" if all_cache["is_live"] else "paper"
+                    all_cache = {key: all_cache}
+                cache = all_cache.get(self._cache_key(), {})
+                if cache.get("expires_at", 0) > time.time() + 60:
                     self.access_token = cache["access_token"]
                     self.token_expires_at = cache["expires_at"]
-                    logger.info("캐시된 토큰 로드 완료 (만료: %s)", datetime.fromtimestamp(self.token_expires_at))
+                    logger.info("캐시된 토큰 로드 완료 [%s] (만료: %s)", self._cache_key(), datetime.fromtimestamp(self.token_expires_at))
                     return
             except (json.JSONDecodeError, KeyError):
                 pass
@@ -175,15 +129,23 @@ class KISClient:
         expires_in = int(data.get("expires_in", 86400))
         self.token_expires_at = time.time() + expires_in
 
-        TOKEN_CACHE_FILE.write_text(
-            json.dumps({
-                "access_token": self.access_token,
-                "expires_at": self.token_expires_at,
-                "is_live": self.is_live,
-            }),
-            encoding="utf-8",
-        )
-        logger.info("새 토큰 발급 완료 (만료: %s)", datetime.fromtimestamp(self.token_expires_at))
+        # 기존 캐시 로드 후 해당 키만 업데이트
+        all_cache = {}
+        if TOKEN_CACHE_FILE.exists():
+            try:
+                all_cache = json.loads(TOKEN_CACHE_FILE.read_text(encoding="utf-8"))
+                # 하위호환: 기존 단일 형식 변환
+                if "access_token" in all_cache and "is_live" in all_cache:
+                    key = "live" if all_cache["is_live"] else "paper"
+                    all_cache = {key: {"access_token": all_cache["access_token"], "expires_at": all_cache["expires_at"]}}
+            except (json.JSONDecodeError, KeyError):
+                all_cache = {}
+        all_cache[self._cache_key()] = {
+            "access_token": self.access_token,
+            "expires_at": self.token_expires_at,
+        }
+        TOKEN_CACHE_FILE.write_text(json.dumps(all_cache), encoding="utf-8")
+        logger.info("새 토큰 발급 완료 [%s] (만료: %s)", self._cache_key(), datetime.fromtimestamp(self.token_expires_at))
 
     def _ensure_token(self):
         """토큰 만료 5분 전에 자동 갱신."""
@@ -217,7 +179,12 @@ class KISClient:
             except requests.exceptions.HTTPError as e:
                 if e.response is not None and e.response.status_code in (500, 502, 503, 504):
                     last_exc = e
-                    logger.warning("GET %s 서버 오류 %d (시도 %d/3)", path, e.response.status_code, attempt + 1)
+                    body_text = ""
+                    try:
+                        body_text = e.response.text[:200]
+                    except Exception:
+                        pass
+                    logger.warning("GET %s 서버 오류 %d (시도 %d/3) %s", path, e.response.status_code, attempt + 1, body_text)
                 else:
                     raise
             except requests.exceptions.Timeout as e:
@@ -241,7 +208,12 @@ class KISClient:
             except requests.exceptions.HTTPError as e:
                 if e.response is not None and e.response.status_code in (500, 502, 503, 504):
                     last_exc = e
-                    logger.warning("POST %s 서버 오류 %d (시도 %d/3)", path, e.response.status_code, attempt + 1)
+                    body_text = ""
+                    try:
+                        body_text = e.response.text[:200]
+                    except Exception:
+                        pass
+                    logger.warning("POST %s 서버 오류 %d (시도 %d/3) %s", path, e.response.status_code, attempt + 1, body_text)
                 else:
                     raise
             except requests.exceptions.Timeout as e:
@@ -417,6 +389,39 @@ class KISClient:
             ))
         return result
 
+    # ── 거래량 순위 ────────────────────────────────────
+
+    def get_kr_volume_rank(self, count: int = 20) -> list[dict]:
+        """국내 거래량 상위 종목을 조회한다."""
+        data = self._get(
+            "/uapi/domestic-stock/v1/quotations/volume-rank",
+            "FHPST01710000",
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_COND_SCR_DIV_CODE": "20101",
+                "FID_INPUT_ISCD": "0000",
+                "FID_DIV_CLS_CODE": "0",
+                "FID_BLNG_CLS_CODE": "0",
+                "FID_TRGT_CLS_CODE": "111111111",
+                "FID_TRGT_EXLS_CLS_CODE": "000000",
+                "FID_INPUT_PRICE_1": "0",
+                "FID_INPUT_PRICE_2": "0",
+                "FID_VOL_CNT": "0",
+                "FID_INPUT_DATE_1": "",
+            },
+        )
+        results = []
+        for item in data.get("output", [])[:count]:
+            results.append({
+                "symbol": item.get("mksc_shrn_iscd", ""),
+                "name": item.get("hts_kor_isnm", ""),
+                "price": item.get("stck_prpr", "0"),
+                "change_pct": item.get("prdy_ctrt", "0"),
+                "volume": item.get("acml_vol", "0"),
+                "amount": item.get("acml_tr_pbmn", "0"),
+            })
+        return results
+
     # ── 국내 지수 조회 ──────────────────────────────────
 
     def get_kr_index(self, index_code: str = "0001") -> dict:
@@ -538,7 +543,7 @@ class KISClient:
         if price <= 0 and not self.is_live:
             price = self.get_us_price(symbol).price
             logger.info("모의투자 US 시장가→지정가 변환: %s $%.2f", symbol, price)
-        order_type = "00" if price > 0 else "31"
+        order_type = "00" if price > 0 else "01"
 
         body = {
             "CANO": acct_prefix,
@@ -548,6 +553,7 @@ class KISClient:
             "ORD_DVSN": order_type,
             "ORD_QTY": str(qty),
             "OVRS_ORD_UNPR": str(price),
+            "ORD_SVR_DVSN_CD": "0",
         }
         tr_id = self._tr("us_buy")
         data = self._post("/uapi/overseas-stock/v1/trading/order", tr_id, body)
@@ -564,7 +570,7 @@ class KISClient:
         if price <= 0 and not self.is_live:
             price = self.get_us_price(symbol).price
             logger.info("모의투자 US 시장가→지정가 변환: %s $%.2f", symbol, price)
-        order_type = "00" if price > 0 else "31"
+        order_type = "00" if price > 0 else "01"
 
         body = {
             "CANO": acct_prefix,
@@ -574,6 +580,7 @@ class KISClient:
             "ORD_DVSN": order_type,
             "ORD_QTY": str(qty),
             "OVRS_ORD_UNPR": str(price),
+            "ORD_SVR_DVSN_CD": "0",
         }
         tr_id = self._tr("us_sell")
         data = self._post("/uapi/overseas-stock/v1/trading/order", tr_id, body)

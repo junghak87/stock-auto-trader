@@ -25,7 +25,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config import settings
-from core.kis_client import KISClient
 from core.database import Database
 from core.telegram_bot import TelegramNotifier
 from strategies.composite import CompositeStrategy
@@ -55,27 +54,97 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def build_components(is_live: bool) -> dict:
-    """시스템 컴포넌트를 생성하고 연결한다."""
-    # KIS 클라이언트
+def _create_broker(is_live: bool):
+    """설정된 증권사에 맞는 클라이언트를 생성한다.
+
+    Returns:
+        (broker_client, quote_client) 튜플. quote_client는 시세 전용 클라이언트.
+    """
+    broker_name = settings.broker
+
+    if broker_name == "kiwoom":
+        from core.kiwoom_client import KiwoomClient
+        client = KiwoomClient(
+            app_key=settings.kiwoom.app_key,
+            app_secret=settings.kiwoom.app_secret,
+            account_no=settings.kiwoom.account_no,
+            is_live=is_live,
+        )
+        return client, client
+
+    if broker_name == "hybrid":
+        from core.kiwoom_client import KiwoomClient
+        from core.kis_client import KISClient
+        from core.hybrid_client import HybridBrokerClient
+
+        kr_client = KiwoomClient(
+            app_key=settings.kiwoom.app_key,
+            app_secret=settings.kiwoom.app_secret,
+            account_no=settings.kiwoom.account_no,
+            is_live=is_live,
+        )
+        # KIS: 해외 주문/잔고/시세 담당
+        if is_live:
+            us_client = KISClient(
+                app_key=settings.kis.app_key,
+                app_secret=settings.kis.app_secret,
+                account_no=settings.kis.account_no,
+                is_live=True,
+            )
+        else:
+            us_app_key = settings.kis.paper_app_key or settings.kis.app_key
+            us_app_secret = settings.kis.paper_app_secret or settings.kis.app_secret
+            us_account_no = settings.kis.paper_account_no or settings.kis.account_no
+            us_client = KISClient(
+                app_key=us_app_key,
+                app_secret=us_app_secret,
+                account_no=us_account_no,
+                is_live=False,
+            )
+        client = HybridBrokerClient(kr_client=kr_client, us_client=us_client)
+        logger.info("하이브리드 모드: 국내=키움, 해외=KIS")
+        # quote도 hybrid 자신 (KR시세→키움, US시세→KIS 자동 라우팅)
+        return client, client
+
+    # 기본: KIS
+    from core.kis_client import KISClient
     if is_live:
-        kis_client = KISClient(
+        client = KISClient(
             app_key=settings.kis.app_key,
             app_secret=settings.kis.app_secret,
             account_no=settings.kis.account_no,
             is_live=True,
         )
+        return client, client
     else:
-        # 모의투자 키가 설정되어 있으면 모의투자 키 사용, 아니면 실전 키로 모의투자
         app_key = settings.kis.paper_app_key or settings.kis.app_key
         app_secret = settings.kis.paper_app_secret or settings.kis.app_secret
         account_no = settings.kis.paper_account_no or settings.kis.account_no
-        kis_client = KISClient(
+        client = KISClient(
             app_key=app_key,
             app_secret=app_secret,
             account_no=account_no,
             is_live=False,
         )
+        # 모의투자 시 실전 도메인으로 시세 조회 (거래량 등 시세 API 지원)
+        if settings.kis.app_key:
+            try:
+                quote = KISClient(
+                    app_key=settings.kis.app_key,
+                    app_secret=settings.kis.app_secret,
+                    account_no=settings.kis.account_no,
+                    is_live=True,
+                )
+                logger.info("시세 조회용 실전 클라이언트 생성 완료")
+                return client, quote
+            except Exception as e:
+                logger.warning("실전 시세 클라이언트 생성 실패 (토큰 쿨다운?) — 모의투자 클라이언트로 시세 조회: %s", e)
+        return client, client
+
+
+def build_components(is_live: bool) -> dict:
+    """시스템 컴포넌트를 생성하고 연결한다."""
+    kis_client, quote_client = _create_broker(is_live)
 
     # 핵심 모듈
     database = Database()
@@ -99,7 +168,6 @@ def build_components(is_live: bool) -> dict:
     risk_manager = RiskManager(
         kis_client=kis_client,
         database=database,
-        max_position_ratio=settings.trading.max_position_ratio,
         stop_loss_pct=settings.trading.stop_loss_pct,
         take_profit_pct=settings.trading.take_profit_pct,
         trailing_activation_pct=settings.trading.trailing_activation_pct,
@@ -118,6 +186,7 @@ def build_components(is_live: bool) -> dict:
         database=database,
         notifier=notifier,
         risk_manager=risk_manager,
+        quote_client=quote_client,
     )
     # 지정가 주문 설정
     executor.limit_order_enabled = settings.trading.limit_order_enabled
@@ -147,6 +216,7 @@ def build_components(is_live: bool) -> dict:
             ai_api_key=settings.ai.active_api_key,
             ai_model=settings.ai.model,
             budget_per_stock=settings.trading.budget_per_stock,
+            quote_client=quote_client,
         )
 
     # 꼬리 매매 전략 (분봉 기반, 국내만)
@@ -162,6 +232,7 @@ def build_components(is_live: bool) -> dict:
         strategy=strategy,
         scanner=scanner,
         tail_strategy=tail_strategy,
+        quote_client=quote_client,
     )
 
     return {
@@ -175,101 +246,96 @@ def build_components(is_live: bool) -> dict:
     }
 
 
-def setup_scheduler(jobs: TradingJobs) -> BackgroundScheduler:
-    """APScheduler 스케줄을 설정한다."""
+def setup_scheduler(jobs: TradingJobs, supported_markets: list[str]) -> BackgroundScheduler:
+    """APScheduler 스케줄을 설정한다.
+
+    Args:
+        jobs: 스케줄 작업 모음
+        supported_markets: 브로커가 지원하는 시장 목록 (["KR"], ["KR", "US"])
+    """
     scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
     # ── 국내 장 스케줄 (월~금) ────────────────────────────
-    # 장 시작 준비: 08:50
-    scheduler.add_job(jobs.job_kr_market_open, CronTrigger(day_of_week="mon-fri", hour=8, minute=50))
-
-    # 장중 전략 실행: 09:00 ~ 15:00 (매 15분)
-    scheduler.add_job(
-        jobs.job_kr_strategy_run,
-        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="0,15,30,45"),
-    )
-
-    # 장중 손절/익절 체크: 09:05 ~ 15:25 (매 5분) — 빠른 리스크 대응
-    scheduler.add_job(
-        jobs.job_kr_risk_check,
-        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="5,10,20,25,35,40,50,55"),
-    )
-
-    # 꼬리 매매 (분봉 기반): 09:03 ~ 15:24 (매 3분)
-    scheduler.add_job(
-        jobs.job_kr_tail_trading,
-        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/3"),
-    )
-
-    # 장중 종목 로테이션: 09:30, 11:30, 13:30 (매 2시간)
-    scheduler.add_job(
-        jobs.job_kr_watchlist_rotate,
-        CronTrigger(day_of_week="mon-fri", hour="9,11,13", minute=30),
-    )
-
-    # 장 마감 정산: 15:40
-    scheduler.add_job(jobs.job_kr_market_close, CronTrigger(day_of_week="mon-fri", hour=15, minute=40))
+    if "KR" in supported_markets:
+        scheduler.add_job(jobs.job_kr_market_open, CronTrigger(day_of_week="mon-fri", hour=8, minute=50))
+        scheduler.add_job(
+            jobs.job_kr_strategy_run,
+            CronTrigger(day_of_week="mon-fri", hour="9-15", minute="0,15,30,45"),
+        )
+        scheduler.add_job(
+            jobs.job_kr_risk_check,
+            CronTrigger(day_of_week="mon-fri", hour="9-15", minute="5,10,20,25,35,40,50,55"),
+        )
+        scheduler.add_job(
+            jobs.job_kr_tail_trading,
+            CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/3"),
+        )
+        scheduler.add_job(
+            jobs.job_kr_watchlist_rotate,
+            CronTrigger(day_of_week="mon-fri", hour="9,11,13", minute=30),
+        )
+        scheduler.add_job(jobs.job_kr_market_close, CronTrigger(day_of_week="mon-fri", hour=15, minute=40))
 
     # ── 해외 장 스케줄 (화~토, 한국 시간 기준) ────────────
-    # 미국장 시작 준비: 23:20 (월~금)
-    scheduler.add_job(jobs.job_us_market_open, CronTrigger(day_of_week="mon-fri", hour=23, minute=20))
-
-    # 미국장 전략 실행: 23:30~05:45 (매 15분)
-    scheduler.add_job(
-        jobs.job_us_strategy_run,
-        CronTrigger(day_of_week="mon-fri", hour=23, minute="30,45"),
-    )
-    scheduler.add_job(
-        jobs.job_us_strategy_run,
-        CronTrigger(day_of_week="tue-sat", hour="0-5", minute="0,15,30,45"),
-    )
-
-    # 미국장 손절/익절 체크: 23:35~05:55 (매 5분) — 빠른 리스크 대응
-    scheduler.add_job(
-        jobs.job_us_risk_check,
-        CronTrigger(day_of_week="mon-fri", hour=23, minute="35,40,50,55"),
-    )
-    scheduler.add_job(
-        jobs.job_us_risk_check,
-        CronTrigger(day_of_week="tue-sat", hour="0-5", minute="5,10,20,25,35,40,50,55"),
-    )
-
-    # 미국장 종목 로테이션: 01:30, 03:30 (매 2시간)
-    scheduler.add_job(
-        jobs.job_us_watchlist_rotate,
-        CronTrigger(day_of_week="tue-sat", hour="1,3", minute=30),
-    )
-
-    # 미국장 마감: 06:10 (화~토)
-    scheduler.add_job(jobs.job_us_market_close, CronTrigger(day_of_week="tue-sat", hour=6, minute=10))
+    if "US" in supported_markets:
+        scheduler.add_job(jobs.job_us_market_open, CronTrigger(day_of_week="mon-fri", hour=23, minute=20))
+        scheduler.add_job(
+            jobs.job_us_strategy_run,
+            CronTrigger(day_of_week="mon-fri", hour=23, minute="30,45"),
+        )
+        scheduler.add_job(
+            jobs.job_us_strategy_run,
+            CronTrigger(day_of_week="tue-sat", hour="0-5", minute="0,15,30,45"),
+        )
+        scheduler.add_job(
+            jobs.job_us_risk_check,
+            CronTrigger(day_of_week="mon-fri", hour=23, minute="35,40,50,55"),
+        )
+        scheduler.add_job(
+            jobs.job_us_risk_check,
+            CronTrigger(day_of_week="tue-sat", hour="0-5", minute="5,10,20,25,35,40,50,55"),
+        )
+        scheduler.add_job(
+            jobs.job_us_watchlist_rotate,
+            CronTrigger(day_of_week="tue-sat", hour="1,3", minute=30),
+        )
+        scheduler.add_job(jobs.job_us_market_close, CronTrigger(day_of_week="tue-sat", hour=6, minute=10))
+    else:
+        logger.info("해외 주식 미지원 브로커 — US 스케줄 미등록")
 
     return scheduler
 
 
-def run_once(jobs: TradingJobs):
+def run_once(jobs: TradingJobs, supported_markets: list[str]):
     """1회 전략 실행 후 종료 (테스트/디버깅용)."""
-    logger.info("=== 1회 전략 실행 모드 ===")
+    logger.info("=== 1회 전략 실행 모드 (지원 시장: %s) ===", supported_markets)
+
+    has_kr = "KR" in supported_markets
+    has_us = "US" in supported_markets
 
     # 스캔 먼저 실행 (watchlist가 비어 있을 수 있으므로)
-    if jobs.scanner:
+    if jobs.scanner and has_kr:
         logger.info("종목 스캔 실행 중...")
         jobs.job_kr_market_open()
 
     now = datetime.now()
     hour = now.hour
 
-    # 현재 시간에 따라 국내/해외 전략 실행
     if 9 <= hour < 16:
-        logger.info("국내 장 시간 — 국내 전략 + 꼬리 매매 실행")
-        jobs.job_kr_strategy_run()
-        jobs.job_kr_tail_trading()
+        if has_kr:
+            logger.info("국내 장 시간 — 국내 전략 + 꼬리 매매 실행")
+            jobs.job_kr_strategy_run()
+            jobs.job_kr_tail_trading()
     elif hour >= 23 or hour < 6:
-        logger.info("해외 장 시간 — 해외 전략 실행")
-        jobs.job_us_strategy_run()
+        if has_us:
+            logger.info("해외 장 시간 — 해외 전략 실행")
+            jobs.job_us_strategy_run()
     else:
-        logger.info("장외 시간 — 국내/해외 전략 모두 실행 (테스트)")
-        jobs.job_kr_strategy_run()
-        jobs.job_us_strategy_run()
+        logger.info("장외 시간 — 테스트 실행")
+        if has_kr:
+            jobs.job_kr_strategy_run()
+        if has_us:
+            jobs.job_us_strategy_run()
 
 
 def main():
@@ -280,15 +346,16 @@ def main():
 
     is_live = args.live or settings.trading.is_live
     mode_str = "실전투자" if is_live else "모의투자"
+    broker_name = settings.broker.upper()
     logger.info("=" * 60)
-    logger.info("한국투자증권 자동매매 시스템 시작 [%s 모드]", mode_str)
+    logger.info("자동매매 시스템 시작 [%s | %s 모드]", broker_name, mode_str)
     if settings.trading.total_budget > 0:
-        logger.info("총 투자 한도: %,.0f원 | 종목당: %,.0f원 (%.0f%%)",
-                     settings.trading.total_budget,
-                     settings.trading.budget_per_stock,
-                     settings.trading.max_position_ratio * 100)
+        logger.info("총 투자 한도: %s원 | 최대 %d종목 | 종목당: %s원",
+                     f"{settings.trading.total_budget:,.0f}",
+                     settings.trading.max_stocks,
+                     f"{settings.trading.budget_per_stock:,.0f}")
     else:
-        logger.info("투자 한도: 계좌 총평가액 기준 (종목당 %.0f%%)", settings.trading.max_position_ratio * 100)
+        logger.info("투자 한도: 계좌 총평가액 기준 (최대 %d종목)", settings.trading.max_stocks)
     logger.info("국내 감시 종목: %s", settings.trading.kr_stock_list)
     logger.info("해외 감시 종목: %s", settings.trading.us_stock_list)
     if settings.ai.is_configured:
@@ -305,9 +372,11 @@ def main():
     jobs = components["jobs"]
     notifier = components["notifier"]
 
+    supported = components["kis_client"].supported_markets
+
     # 1회 실행 모드
     if args.once:
-        run_once(jobs)
+        run_once(jobs, supported)
         return
 
     # 텔레그램 봇 폴링 시작 (별도 스레드)
@@ -322,20 +391,20 @@ def main():
     bot_thread.start()
 
     # 스케줄러 시작
-    scheduler = setup_scheduler(jobs)
+    scheduler = setup_scheduler(jobs, supported)
     scheduler.start()
-    notifier.notify_system(f"자동매매 시스템 시작 [{mode_str} 모드]")
+    notifier.notify_system(f"자동매매 시스템 시작 [{broker_name} | {mode_str} 모드]")
 
     # 서비스 시작 시 초기 스캔 (장중 시작 시 watchlist가 비어있는 문제 방지)
     now = datetime.now()
     if jobs.scanner:
-        if 9 <= now.hour < 16:
+        if 9 <= now.hour < 16 and "KR" in supported:
             logger.info("장중 서비스 시작 — 초기 종목 스캔 실행")
             try:
                 jobs.job_kr_market_open()
             except Exception as e:
                 logger.error("초기 국내 스캔 실패: %s", e)
-        elif now.hour >= 23 or now.hour < 6:
+        elif (now.hour >= 23 or now.hour < 6) and "US" in supported:
             logger.info("해외장 서비스 시작 — 초기 종목 스캔 실행")
             try:
                 jobs.job_us_market_open()
