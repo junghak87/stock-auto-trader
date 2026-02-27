@@ -45,6 +45,9 @@ class KiwoomClient:
         self.access_token: str | None = None
         self.token_expires_at: float = 0
         self._session = requests.Session()
+        self._last_request_time: float = 0
+        self._min_interval: float = 0.25  # 초당 4회 제한
+        self._name_cache: dict[str, str] = {}  # 종목코드 → 종목명 캐시
         self._load_or_issue_token()
 
     # ── 인증 ──────────────────────────────────────────────
@@ -114,11 +117,19 @@ class KiwoomClient:
             "next-key": "",
         }
 
+    def _throttle(self):
+        """요청 간격을 조절한다 (429 방지)."""
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._min_interval:
+            time.sleep(self._min_interval - elapsed)
+        self._last_request_time = time.time()
+
     def _post(self, resource_url: str, api_id: str, body: dict) -> dict:
-        """POST 요청 (일시적 오류 시 자동 재시도)."""
+        """POST 요청 (429/5xx 시 자동 재시도)."""
         url = f"{self.base_url}{resource_url}"
         last_exc: Exception | None = None
         for attempt in range(3):
+            self._throttle()
             try:
                 resp = self._session.post(url, headers=self._headers(api_id), json=body, timeout=10)
                 resp.raise_for_status()
@@ -127,14 +138,9 @@ class KiwoomClient:
                 last_exc = e
                 logger.warning("POST %s 연결 오류 (시도 %d/3): %s", resource_url, attempt + 1, e)
             except requests.exceptions.HTTPError as e:
-                if e.response is not None and e.response.status_code in (500, 502, 503, 504):
+                if e.response is not None and e.response.status_code in (429, 500, 502, 503, 504):
                     last_exc = e
-                    body_text = ""
-                    try:
-                        body_text = e.response.text[:200]
-                    except Exception:
-                        pass
-                    logger.warning("POST %s 서버 오류 %d (시도 %d/3) %s", resource_url, e.response.status_code, attempt + 1, body_text)
+                    logger.warning("POST %s 오류 %d (시도 %d/3)", resource_url, e.response.status_code, attempt + 1)
                 else:
                     raise
             except requests.exceptions.Timeout as e:
@@ -142,6 +148,30 @@ class KiwoomClient:
                 logger.warning("POST %s 타임아웃 (시도 %d/3)", resource_url, attempt + 1)
             time.sleep(1.0 * (attempt + 1))
         raise last_exc  # type: ignore[misc]
+
+    # ── 유틸리티 ─────────────────────────────────────────
+
+    @staticmethod
+    def _p(val) -> float:
+        """키움 가격 문자열에서 부호(+/-)를 제거하고 절대값을 반환한다.
+
+        키움 API는 전일 대비 등락 방향을 가격 앞에 +/- 부호로 표시한다.
+        예: "-216500" → 실제 가격은 216500 (하락 표시)
+        """
+        return abs(float(val or 0))
+
+    def _get_name(self, symbol: str) -> str:
+        """종목명을 캐시에서 조회하거나, 없으면 API로 1회 조회한다."""
+        if symbol in self._name_cache:
+            return self._name_cache[symbol]
+        try:
+            data = self._post("/api/dostk/stkinfo", "ka10002", body={"stk_cd": symbol})
+            name = data.get("stk_nm", "")
+            if name:
+                self._name_cache[symbol] = name
+            return name
+        except Exception:
+            return ""
 
     # ── 국내 주식 시세 ────────────────────────────────────
 
@@ -158,22 +188,22 @@ class KiwoomClient:
                 volume=0, high=0, low=0, open=0, prev_close=0, market="KR",
             )
         o = items[0]
-        close = float(o.get("close_pric", 0))
-        prev = float(o.get("close_pric", 0))  # 전일 종가는 두 번째 항목에서
+        close = self._p(o.get("close_pric", 0))
+        prev = close
         if len(items) > 1:
-            prev = float(items[1].get("close_pric", 0))
+            prev = self._p(items[1].get("close_pric", 0))
         change = close - prev if prev else 0
         change_pct = float(o.get("flu_rt", 0))
         return StockPrice(
             symbol=symbol,
-            name="",
+            name=self._get_name(symbol),
             price=close,
             change=change,
             change_pct=change_pct,
             volume=int(o.get("trde_qty", 0)),
-            high=float(o.get("high_pric", 0)),
-            low=float(o.get("low_pric", 0)),
-            open=float(o.get("open_pric", 0)),
+            high=self._p(o.get("high_pric", 0)),
+            low=self._p(o.get("low_pric", 0)),
+            open=self._p(o.get("open_pric", 0)),
             prev_close=prev,
             market="KR",
         )
@@ -275,11 +305,15 @@ class KiwoomClient:
             )
             results = []
             for item in data.get("bid_req_upper", [])[:count]:
+                sym = item.get("stk_cd", "")
+                name = item.get("stk_nm", "")
+                if sym and name:
+                    self._name_cache[sym] = name
                 results.append({
-                    "symbol": item.get("stk_cd", ""),
-                    "name": item.get("stk_nm", ""),
-                    "price": item.get("cur_prc", "0"),
-                    "change_pct": "0",  # 이 API에서는 등락률 직접 제공 안 함
+                    "symbol": sym,
+                    "name": name,
+                    "price": str(self._p(item.get("cur_prc", "0"))),
+                    "change_pct": "0",
                     "volume": item.get("trde_qty", "0"),
                     "amount": "0",
                 })
