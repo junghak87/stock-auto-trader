@@ -225,10 +225,10 @@ class KiwoomClient:
         for item in data.get("stk_dt_pole_chart_qry", [])[:count]:
             result.append(OHLCVData(
                 date=item.get("dt", ""),
-                open=float(item.get("open_pric", 0)),
-                high=float(item.get("high_pric", 0)),
-                low=float(item.get("low_pric", 0)),
-                close=float(item.get("cur_prc", 0)),
+                open=self._p(item.get("open_pric", 0)),
+                high=self._p(item.get("high_pric", 0)),
+                low=self._p(item.get("low_pric", 0)),
+                close=self._p(item.get("cur_prc", 0)),
                 volume=int(item.get("trde_qty", 0)),
             ))
         return result
@@ -248,10 +248,10 @@ class KiwoomClient:
         for item in data.get("stk_min_pole_chart_qry", []):
             result.append(OHLCVData(
                 date=item.get("cntr_tm", ""),
-                open=float(item.get("open_pric", 0)),
-                high=float(item.get("high_pric", 0)),
-                low=float(item.get("low_pric", 0)),
-                close=float(item.get("cur_prc", 0)),
+                open=self._p(item.get("open_pric", 0)),
+                high=self._p(item.get("high_pric", 0)),
+                low=self._p(item.get("low_pric", 0)),
+                close=self._p(item.get("cur_prc", 0)),
                 volume=int(item.get("trde_qty", 0)),
             ))
         return result
@@ -309,13 +309,16 @@ class KiwoomClient:
                 name = item.get("stk_nm", "")
                 if sym and name:
                     self._name_cache[sym] = name
+                price = self._p(item.get("cur_prc", "0"))
+                change_pct = float(item.get("flu_rt", 0))
+                volume = int(item.get("trde_qty", 0))
                 results.append({
                     "symbol": sym,
                     "name": name,
-                    "price": str(self._p(item.get("cur_prc", "0"))),
-                    "change_pct": "0",
-                    "volume": item.get("trde_qty", "0"),
-                    "amount": "0",
+                    "price": str(int(price)),
+                    "change_pct": f"{change_pct:.2f}",
+                    "volume": str(volume),
+                    "amount": str(int(price * volume)) if volume else "0",
                 })
             return results
         except Exception as e:
@@ -420,8 +423,8 @@ class KiwoomClient:
             qty = int(item.get("rmnd_qty", 0))
             if qty == 0:
                 continue
-            avg_price = float(item.get("pur_pric", 0))
-            current_price = float(item.get("cur_prc", 0))
+            avg_price = self._p(item.get("pur_pric", 0))
+            current_price = self._p(item.get("cur_prc", 0))
             pnl = float(item.get("evltv_prft", 0))
             pnl_pct = float(item.get("prft_rt", 0))
             positions.append(Position(
