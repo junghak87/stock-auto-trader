@@ -61,6 +61,9 @@ class RiskManager:
         self._last_loss_time: datetime | None = None
         self._trading_halted: bool = False
         self._halt_reason: str = ""
+        # 일일 실현 손익 추적 (매도 체결 시 누적)
+        self._daily_realized_pnl: float = 0
+        self._daily_realized_date: str = ""  # "YYYY-MM-DD"
         # 일일 최대 손실 체크 캐시 (60초)
         self._daily_loss_cache_time: datetime | None = None
         self._daily_loss_cache_result: tuple[bool, str] = (True, "")
@@ -98,29 +101,37 @@ class RiskManager:
         return True, "거래 가능"
 
     def _check_daily_loss_cached(self) -> tuple[bool, str]:
-        """일일 최대 손실을 체크한다 (60초 캐시)."""
-        now = datetime.now()
-        if self._daily_loss_cache_time and (now - self._daily_loss_cache_time).total_seconds() < 60:
-            return self._daily_loss_cache_result
+        """일일 최대 손실을 체크한다 (실현 손익 기준)."""
+        if self.total_budget <= 0:
+            return (True, "")
 
-        result = (True, "")
-        if self.total_budget > 0:
-            try:
-                cash_info = self._get_cash_info()
-                realized_pnl = cash_info.get("total_pnl", 0)
-                max_loss = self.total_budget * (self.daily_max_loss_pct / 100)
+        # 날짜 변경 시 리셋
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._daily_realized_date != today:
+            self._daily_realized_pnl = 0
+            self._daily_realized_date = today
 
-                if realized_pnl <= -max_loss:
-                    self._trading_halted = True
-                    self._halt_reason = f"일일 최대 손실 초과: {realized_pnl:,.0f}원 (한도: -{max_loss:,.0f}원)"
-                    result = (False, self._halt_reason)
-                    logger.warning(self._halt_reason)
-            except Exception as e:
-                logger.warning("일일 손실 체크 실패: %s", e)
+        max_loss = self.total_budget * (self.daily_max_loss_pct / 100)
 
-        self._daily_loss_cache_time = now
-        self._daily_loss_cache_result = result
-        return result
+        if self._daily_realized_pnl <= -max_loss:
+            self._trading_halted = True
+            self._halt_reason = (
+                f"일일 실현 손실 초과: {self._daily_realized_pnl:,.0f}원 "
+                f"(한도: -{max_loss:,.0f}원)"
+            )
+            logger.warning(self._halt_reason)
+            return (False, self._halt_reason)
+
+        return (True, "")
+
+    def record_sell_pnl(self, pnl: float):
+        """매도 실현 손익을 기록한다 (일일 손실 한도 추적용)."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._daily_realized_date != today:
+            self._daily_realized_pnl = 0
+            self._daily_realized_date = today
+        self._daily_realized_pnl += pnl
+        logger.info("일일 실현 손익: %+,.0f원 (누적: %+,.0f원)", pnl, self._daily_realized_pnl)
 
     def record_stop_loss(self):
         """손절 발생을 기록한다 (연속 손절 추적)."""

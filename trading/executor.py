@@ -372,7 +372,7 @@ class TradingExecutor:
             except Exception:
                 pass
 
-        # 매도 시 손익 정보 조회 (캐시된 잔고에서)
+        # 매도 시 손익 정보 조회 (캐시된 잔고에서) + 실현 손익 기록
         avg_price, pnl, pnl_pct = 0.0, 0.0, 0.0
         if order.side == "sell" and order.success:
             for pos in self._balance_cache.get(market, []):
@@ -381,6 +381,10 @@ class TradingExecutor:
                     pnl = pos.pnl
                     pnl_pct = pos.pnl_pct
                     break
+            # 일일 실현 손익 누적 (US는 원화 환산)
+            if pnl != 0:
+                pnl_krw = pnl * getattr(self.risk, "usd_krw_rate", 1450) if market == "US" else pnl
+                self.risk.record_sell_pnl(pnl_krw)
 
         self.db.save_trade(
             symbol=order.symbol,
