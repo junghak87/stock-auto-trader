@@ -82,8 +82,8 @@ class RSIStrategy(BaseStrategy):
                 detail=f"RSI 과매도 접근 (RSI={current_rsi:.1f}, 하락 중)",
             )
 
-        # 과매수 접근 (60~70) → 약한 매도
-        if current_rsi > 60 and current_rsi > prev_rsi:
+        # 과매수 접근 (65~70) → 약한 매도 (60~65는 모멘텀 구간이므로 제외)
+        if current_rsi > 65 and current_rsi > prev_rsi:
             return StrategyResult(
                 signal=Signal.SELL,
                 strength=0.2,

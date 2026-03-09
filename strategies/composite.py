@@ -71,6 +71,11 @@ class CompositeStrategy(BaseStrategy):
         if self._ai_strategy:
             self._ai_strategy.set_market_context(context)
 
+    def set_stock_info(self, symbol: str, name: str = ""):
+        """AI 전략에 현재 분석 종목 정보를 전달한다."""
+        if self._ai_strategy:
+            self._ai_strategy.set_stock_info(symbol, name)
+
     def analyze(self, df: pd.DataFrame) -> StrategyResult:
         results: list[StrategyResult] = []
         for strategy in self.strategies:

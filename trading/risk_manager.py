@@ -245,6 +245,13 @@ class RiskManager:
             symbol, atr_pct, dynamic_stop, dynamic_profit,
         )
 
+    def set_breakeven_stop(self, symbol: str):
+        """분할 익절 후 잔여분의 손절선을 매입가(0%)로 올린다 (본전 스톱)."""
+        current = self._dynamic_thresholds.get(symbol, (self.stop_loss_pct, self.take_profit_pct))
+        # 손절을 0.5%로 설정 (매입가 근처, 수수료 고려)
+        self._dynamic_thresholds[symbol] = (0.5, current[1])
+        logger.info("본전 스톱 설정: %s — 손절=-0.5%% (분할 익절 잔여분 보호)", symbol)
+
     def _get_thresholds(self, symbol: str) -> tuple[float, float]:
         """종목의 손절/익절 비율을 반환한다 (동적 > 기본값)."""
         return self._dynamic_thresholds.get(symbol, (self.stop_loss_pct, self.take_profit_pct))

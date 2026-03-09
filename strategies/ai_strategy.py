@@ -70,6 +70,9 @@ class AIStrategy(BaseStrategy):
         self._cache: dict[str, StrategyResult] = {}
         # 시장 컨텍스트 (KOSPI/KOSDAQ 지수 등)
         self._market_context: str = ""
+        # 현재 분석 중인 종목 정보
+        self._stock_name: str = ""
+        self._stock_symbol: str = ""
         self._last_ai_call: float = 0  # rate limit 방어용 타임스탬프
 
     def analyze(self, df: pd.DataFrame) -> StrategyResult:
@@ -121,6 +124,11 @@ class AIStrategy(BaseStrategy):
         """시장 컨텍스트를 설정한다 (전략 실행 전 호출)."""
         self._market_context = context
 
+    def set_stock_info(self, symbol: str, name: str = ""):
+        """현재 분석 종목 정보를 설정한다 (전략 실행 전 호출)."""
+        self._stock_symbol = symbol
+        self._stock_name = name
+
     # ── 프롬프트 구성 ─────────────────────────────────────
 
     def _build_prompt(self, df: pd.DataFrame) -> str:
@@ -154,7 +162,15 @@ class AIStrategy(BaseStrategy):
         # 최근 10일 데이터 추출
         recent = df.tail(10).copy()
 
-        lines = ["[최근 10일 시세 및 기술적 지표]"]
+        # 종목 정보
+        if self._stock_name or self._stock_symbol:
+            stock_label = self._stock_name or self._stock_symbol
+            if self._stock_name and self._stock_symbol:
+                stock_label = f"{self._stock_name} ({self._stock_symbol})"
+            lines = [f"[종목: {stock_label}]", ""]
+        else:
+            lines = []
+        lines.append("[최근 10일 시세 및 기술적 지표]")
         lines.append("날짜 | 종가 | 거래량 | MA5 | MA20 | RSI | MACD_Hist | BB상단 | BB하단 | ATR%")
         lines.append("-" * 110)
 

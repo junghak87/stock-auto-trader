@@ -243,7 +243,9 @@ class TradingExecutor:
             if self.split_sell_enabled and stage_info and not stage_info.get("partial_sold"):
                 sell_qty = max(1, int(qty * self.split_sell_first_ratio))
                 stage_info["partial_sold"] = True
-                logger.info("분할 익절 (1차): %s %d/%d주", symbol, sell_qty, qty)
+                # 잔여분 보호: 손절선을 매입가 수준으로 올림 (본전 스톱)
+                self.risk.set_breakeven_stop(symbol)
+                logger.info("분할 익절 (1차): %s %d/%d주 — 잔여분 본전 스톱 설정", symbol, sell_qty, qty)
             else:
                 sell_qty = qty
                 self._position_stages.pop(symbol, None)

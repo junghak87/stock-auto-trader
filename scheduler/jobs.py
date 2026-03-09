@@ -117,8 +117,15 @@ class TradingJobs:
             if ctx:
                 self.strategy.set_market_context(ctx)
 
+        # 종목명 매핑 (AI에게 종목/업종 정보 제공)
+        stock_names = {item["symbol"]: item.get("name", "") for item in self.db.get_watchlist("KR")}
+
         for symbol in self._get_kr_stocks():
             try:
+                # AI에 종목 정보 전달
+                if hasattr(self.strategy, 'set_stock_info'):
+                    self.strategy.set_stock_info(symbol, stock_names.get(symbol, ""))
+
                 # 일봉 데이터 조회 (시세 조회 클라이언트 사용)
                 ohlcv = self.quote.get_kr_daily_prices(symbol, count=60)
                 if not ohlcv:
@@ -174,6 +181,10 @@ class TradingJobs:
                 result = self.tail_strategy.analyze(df_5min)
 
                 if result.signal != Signal.HOLD and result.strength >= 0.3:
+                    # 이미 보유 중인 종목에 매수 시그널이면 건너뜀
+                    if result.signal == Signal.BUY and self.executor._is_holding(symbol, "KR"):
+                        logger.debug("[%s] 꼬리 매수 스킵 — 이미 보유 중", symbol)
+                        continue
                     logger.info("[%s] 꼬리 매매 시그널: %s (%.2f) — %s",
                                 symbol, result.signal.value, result.strength, result.detail)
                     self.executor.execute_signal(symbol, "KR", result)
@@ -390,8 +401,15 @@ class TradingJobs:
         """해외 장중 전략 실행 (매 15분)."""
         logger.info("--- 해외 전략 실행 ---")
 
+        # 종목명 매핑
+        stock_names = {item["symbol"]: item.get("name", "") for item in self.db.get_watchlist("US")}
+
         for symbol in self._get_us_stocks():
             try:
+                # AI에 종목 정보 전달
+                if hasattr(self.strategy, 'set_stock_info'):
+                    self.strategy.set_stock_info(symbol, stock_names.get(symbol, ""))
+
                 ohlcv = self.quote.get_us_daily_prices(symbol, count=60)
                 if not ohlcv:
                     continue
