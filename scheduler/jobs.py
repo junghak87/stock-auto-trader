@@ -181,10 +181,6 @@ class TradingJobs:
                 result = self.tail_strategy.analyze(df_5min)
 
                 if result.signal != Signal.HOLD and result.strength >= 0.3:
-                    # 이미 보유 중인 종목에 매수 시그널이면 건너뜀
-                    if result.signal == Signal.BUY and self.executor._is_holding(symbol, "KR"):
-                        logger.debug("[%s] 꼬리 매수 스킵 — 이미 보유 중", symbol)
-                        continue
                     logger.info("[%s] 꼬리 매매 시그널: %s (%.2f) — %s",
                                 symbol, result.signal.value, result.strength, result.detail)
                     self.executor.execute_signal(symbol, "KR", result)
@@ -331,7 +327,8 @@ class TradingJobs:
             self.executor._balance_cache_time = _dt.now()
 
         try:
-            picks = self.scanner.scan_us_and_select(rotate=True)
+            held_positions = [p for p in positions if p.qty > 0] if positions else None
+            picks = self.scanner.scan_us_and_select(rotate=True, positions=held_positions)
             drops = self.scanner.last_drops
 
             removed = []

@@ -217,6 +217,7 @@ def build_components(is_live: bool) -> dict:
             ai_model=settings.ai.model,
             budget_per_stock=settings.trading.budget_per_stock,
             quote_client=quote_client,
+            us_candidates=settings.trading.us_scan_candidate_list,
         )
 
     # 꼬리 매매 전략 (분봉 기반, 국내만)

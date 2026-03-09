@@ -41,7 +41,7 @@ class MACrossStrategy(BaseStrategy):
             gap_pct = (curr_short - curr_long) / curr_long * 100
             return StrategyResult(
                 signal=Signal.BUY,
-                strength=min(gap_pct / 2, 1.0),
+                strength=min(max(gap_pct / 2, 0.3), 1.0),
                 strategy_name=self.name,
                 detail=f"골든크로스 (MA{self.short_window}={curr_short:.0f} > MA{self.long_window}={curr_long:.0f}, 괴리: {gap_pct:.2f}%)",
             )
@@ -51,7 +51,7 @@ class MACrossStrategy(BaseStrategy):
             gap_pct = (curr_long - curr_short) / curr_long * 100
             return StrategyResult(
                 signal=Signal.SELL,
-                strength=min(gap_pct / 2, 1.0),
+                strength=min(max(gap_pct / 2, 0.3), 1.0),
                 strategy_name=self.name,
                 detail=f"데드크로스 (MA{self.short_window}={curr_short:.0f} < MA{self.long_window}={curr_long:.0f}, 괴리: {gap_pct:.2f}%)",
             )

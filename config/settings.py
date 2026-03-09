@@ -71,6 +71,10 @@ class TradingSettings(BaseSettings):
 
     watch_stocks_kr: str = Field(default="005930", alias="WATCH_STOCKS_KR")
     watch_stocks_us: str = Field(default="AAPL", alias="WATCH_STOCKS_US")
+    us_scan_candidates: str = Field(
+        default="AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,AMD,NFLX,AVGO,CRM,ORCL,PLTR,SOFI,COIN,SQ,SHOP,SNOW,UBER,ABNB",
+        alias="US_SCAN_CANDIDATES",
+    )
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
@@ -81,6 +85,10 @@ class TradingSettings(BaseSettings):
     @property
     def us_stock_list(self) -> list[str]:
         return [s.strip() for s in self.watch_stocks_us.split(",") if s.strip()]
+
+    @property
+    def us_scan_candidate_list(self) -> list[str]:
+        return [s.strip() for s in self.us_scan_candidates.split(",") if s.strip()]
 
     @property
     def is_live(self) -> bool:

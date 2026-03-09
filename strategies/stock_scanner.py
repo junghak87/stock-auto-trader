@@ -76,6 +76,7 @@ class StockScanner:
         ai_model: str = "",
         budget_per_stock: float = 0,
         quote_client: BrokerClient | None = None,
+        us_candidates: list[str] | None = None,
     ):
         self.kis = kis_client
         self.quote = quote_client or kis_client  # 시세 조회 전용 클라이언트
@@ -84,6 +85,7 @@ class StockScanner:
         self.ai_api_key = ai_api_key
         self.ai_model = ai_model
         self.budget_per_stock = budget_per_stock
+        self.us_candidates = us_candidates or []
         self.last_drops: list[str] = []
         self._last_ai_call: float = 0  # rate limit 방어용 타임스탬프
         self._market_context: str = ""  # 시장 지수 컨텍스트
@@ -162,11 +164,11 @@ class StockScanner:
 
         return added
 
-    def scan_us_and_select(self, candidates: list[str] | None = None, rotate: bool = False) -> list[dict]:
+    def scan_us_and_select(self, candidates: list[str] | None = None, rotate: bool = False, positions: list = None) -> list[dict]:
         """미국 주요 종목 시세를 조회하고 AI로 유망 종목을 선별한다."""
         # 후보 풀: 전달받은 목록 또는 주요 미국 종목
         if not candidates:
-            candidates = [
+            candidates = self.us_candidates or [
                 "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA",
                 "AMD", "NFLX", "AVGO", "CRM", "ORCL", "PLTR", "SOFI",
                 "COIN", "SQ", "SHOP", "SNOW", "UBER", "ABNB",
@@ -203,10 +205,26 @@ class StockScanner:
         lines.append("-" * 80)
         for item in us_data:
             lines.append(f"{item['symbol']} | {item['name']} | ${item['price']} | {item['change_pct']}% | {item['volume']}")
+
+        # 보유 종목 손익 현황 (로테이션 시)
+        if rotate and positions:
+            lines.append("\n[현재 보유 종목 손익 현황]")
+            lines.append("종목코드 | 종목명 | 매수가 | 현재가 | 수익률 | 수량")
+            lines.append("-" * 60)
+            for pos in positions:
+                lines.append(
+                    f"{pos.symbol} | {pos.name} | ${pos.avg_price:.2f} | "
+                    f"${pos.current_price:.2f} | {pos.pnl_pct:+.1f}% | {pos.qty}"
+                )
+            loss_positions = [p for p in positions if p.pnl_pct <= -3]
+            if loss_positions:
+                loss_names = ", ".join(f"{p.symbol}({p.pnl_pct:+.1f}%)" for p in loss_positions)
+                lines.append(f"⚠ 손실 종목: {loss_names} → drops에 포함을 강력 권장")
+
         if current_watchlist:
             lines.append(f"\n[현재 감시 중인 종목]: {', '.join(current_watchlist)}")
             if rotate:
-                lines.append("기존 종목 중 모멘텀을 잃은 종목은 drops에, 신규 유망 종목은 picks에 넣어주세요.")
+                lines.append("손실 중인 보유 종목은 drops에, 신규 유망 종목은 picks에 넣어주세요.")
             else:
                 lines.append("이미 감시 중인 종목은 제외하고 새로운 종목만 선별해주세요.")
         lines.append("\n위 데이터를 분석하여 단기 매매에 유망한 미국 종목을 선별해주세요.")
