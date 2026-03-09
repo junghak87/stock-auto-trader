@@ -177,14 +177,14 @@ class KISClient:
                 last_exc = e
                 logger.warning("GET %s 연결 오류 (시도 %d/3): %s", path, attempt + 1, e)
             except requests.exceptions.HTTPError as e:
-                if e.response is not None and e.response.status_code in (500, 502, 503, 504):
+                if e.response is not None and e.response.status_code in (429, 500, 502, 503, 504):
                     last_exc = e
                     body_text = ""
                     try:
                         body_text = e.response.text[:200]
                     except Exception:
                         pass
-                    logger.warning("GET %s 서버 오류 %d (시도 %d/3) %s", path, e.response.status_code, attempt + 1, body_text)
+                    logger.warning("GET %s 오류 %d (시도 %d/3) %s", path, e.response.status_code, attempt + 1, body_text)
                 else:
                     raise
             except requests.exceptions.Timeout as e:
@@ -206,14 +206,14 @@ class KISClient:
                 last_exc = e
                 logger.warning("POST %s 연결 오류 (시도 %d/3): %s", path, attempt + 1, e)
             except requests.exceptions.HTTPError as e:
-                if e.response is not None and e.response.status_code in (500, 502, 503, 504):
+                if e.response is not None and e.response.status_code in (429, 500, 502, 503, 504):
                     last_exc = e
                     body_text = ""
                     try:
                         body_text = e.response.text[:200]
                     except Exception:
                         pass
-                    logger.warning("POST %s 서버 오류 %d (시도 %d/3) %s", path, e.response.status_code, attempt + 1, body_text)
+                    logger.warning("POST %s 오류 %d (시도 %d/3) %s", path, e.response.status_code, attempt + 1, body_text)
                 else:
                     raise
             except requests.exceptions.Timeout as e:

@@ -67,13 +67,14 @@ class TelegramNotifier:
 
     # ── 알림 유형별 전송 ──────────────────────────────────
 
-    def notify_signal(self, symbol: str, market: str, strategy: str, signal: str, detail: str = ""):
+    def notify_signal(self, symbol: str, market: str, strategy: str, signal: str, detail: str = "", name: str = ""):
         """전략 시그널 발생 알림."""
         emoji = "🔴" if signal == "sell" else "🟢" if signal == "buy" else "⚪"
         side_kr = "매수" if signal == "buy" else "매도" if signal == "sell" else "관망"
+        display = f"{symbol} {name}" if name else symbol
         msg = (
             f"{emoji} <b>시그널 발생</b>\n"
-            f"종목: {symbol} ({market})\n"
+            f"종목: {display} ({market})\n"
             f"전략: {strategy}\n"
             f"방향: {side_kr}\n"
         )
@@ -82,17 +83,53 @@ class TelegramNotifier:
         msg += f"시각: {datetime.now().strftime('%H:%M:%S')}"
         self.send(msg)
 
-    def notify_order(self, symbol: str, side: str, qty: int, price: float, success: bool, message: str = ""):
-        """주문 체결 알림."""
+    def notify_order(
+        self, symbol: str, side: str, qty: int, price: float, success: bool,
+        message: str = "", name: str = "", strategy: str = "",
+        avg_price: float = 0, pnl: float = 0, pnl_pct: float = 0,
+        market: str = "KR", usd_krw_rate: float = 0,
+    ):
+        """주문 체결 알림 (매도 시 손익 포함, 해외 종목은 달러+원화 환산)."""
         emoji = "✅" if success else "❌"
         side_kr = "매수" if side == "buy" else "매도"
+        display = f"{symbol} {name}" if name else symbol
+        is_us = market == "US"
+
+        # 가격 포맷 (KR: 원화, US: 달러+원화환산)
+        if is_us:
+            price_str = f"${price:,.2f}"
+            if usd_krw_rate > 0:
+                price_str += f" (≈{price * usd_krw_rate:,.0f}원)"
+        else:
+            price_str = f"{price:,.0f}원"
+
         msg = (
             f"{emoji} <b>주문 {'체결' if success else '실패'}</b>\n"
-            f"종목: {symbol}\n"
+            f"종목: {display} [{market}]\n"
             f"구분: {side_kr}\n"
             f"수량: {qty}주\n"
-            f"가격: {price:,.0f}\n"
+            f"가격: {price_str}\n"
         )
+        if strategy:
+            strategy_kr = {"stop_loss": "손절", "take_profit": "익절", "split_buy_stage2": "분할매수 2단계"}.get(strategy, strategy)
+            msg += f"전략: {strategy_kr}\n"
+        # 매도 성공 시 손익 표시
+        if side == "sell" and success and avg_price > 0:
+            pnl_emoji = "📈" if pnl >= 0 else "📉"
+            if is_us:
+                avg_str = f"${avg_price:,.2f}"
+                pnl_str = f"${pnl:+,.2f}"
+                if usd_krw_rate > 0:
+                    pnl_str += f" (≈{pnl * usd_krw_rate:+,.0f}원)"
+            else:
+                avg_str = f"{avg_price:,.0f}원"
+                pnl_str = f"{pnl:+,.0f}원"
+            msg += (
+                f"\n{pnl_emoji} <b>매매 손익</b>\n"
+                f"  매수 평균가: {avg_str}\n"
+                f"  수익률: {pnl_pct:+.1f}%\n"
+                f"  손익금: {pnl_str}\n"
+            )
         if message:
             msg += f"메시지: {message}\n"
         msg += f"시각: {datetime.now().strftime('%H:%M:%S')}"

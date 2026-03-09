@@ -14,35 +14,43 @@ from core.database import Database
 
 logger = logging.getLogger(__name__)
 
-SCAN_SYSTEM_PROMPT = """당신은 주식 종목 선별 전문가입니다.
-거래량 상위 종목과 급등/급락 종목 데이터를 분석하여 매매에 유망한 종목을 선별해주세요.
+SCAN_SYSTEM_PROMPT = """당신은 단기 매매(1~3일 보유) 전문가입니다.
+거래량 상위 종목 데이터를 분석하여 단기 수익이 기대되는 종목을 엄선해주세요.
 
-선별 기준:
-- 거래량이 평소 대비 급증한 종목 (관심 증가, 유동성 확보)
-- 적절한 변동성이 있는 종목 (일 변동폭 1~5% 수준)
-- 상승 추세의 초기 단계로 보이는 종목 (모멘텀)
-- 과매도 구간에서 반등 조짐이 보이는 종목 (평균 회귀)
-- 과도하게 급등(+10% 이상)하여 리스크가 높은 종목은 제외
-- 시가총액이 너무 작은 종목(투기성)은 제외
+핵심 선별 기준 (리스크 관리 최우선):
+1. 거래량 급증 + 상승 초기 단계: 거래량이 터지면서 등락률 +1~4% 수준인 종목 선호
+2. 이미 급등한 종목 회피: 등락률 +7% 이상인 종목은 고점 매수 위험 → 반드시 제외
+3. 급락 종목 주의: 등락률 -5% 이하 종목은 하락 추세 가능성 → 제외
+4. 거래대금 충분: 거래대금이 너무 적으면 유동성 부족 → 제외
+5. 눌림목 매수 기회: 전일 강세 후 당일 소폭 조정(-1~-3%) 중 거래량 유지 종목 선호
+
+절대 제외 대상:
+- 등락률 +7% 이상 (고점 추격 매수 위험)
+- 등락률 -5% 이하 (하락 추세)
+- 관리종목, 투기성 테마주 의심 종목
 
 반드시 아래 JSON 형식으로만 응답하세요:
 {"picks": [{"symbol": "종목코드", "reason": "선별 사유"}], "market_sentiment": "bullish 또는 bearish 또는 neutral", "summary": "시장 분위기 한줄 요약"}
 
-최대 5개 종목만 선별하세요. 유망 종목이 없으면 빈 리스트를 반환하세요."""
+최대 5개 종목만 선별하세요. 확신이 없으면 적게 선별하세요. 유망 종목이 없으면 빈 리스트를 반환하세요."""
 
-ROTATE_SYSTEM_PROMPT = """당신은 주식 종목 선별 전문가입니다.
-현재 감시 중인 종목을 재평가하고, 거래량 상위 종목에서 신규 유망 종목을 찾아주세요.
+ROTATE_SYSTEM_PROMPT = """당신은 단기 매매(1~3일 보유) 종목 로테이션 전문가입니다.
+현재 감시/보유 중인 종목을 재평가하고, 거래량 상위에서 더 좋은 기회를 찾아주세요.
 
-재평가 기준:
-- 기존 종목 중 거래량이 급감하거나 횡보하는 종목은 제거 대상
-- 기존 종목 중 추세가 반전된 종목은 제거 대상
-- 신규 종목은 거래량 급증, 적절한 변동성(1~5%), 모멘텀이 있는 종목
-- 과도하게 급등(+10% 이상)하여 리스크가 높은 종목은 제외
+손실 종목 교체 원칙 (가장 중요):
+- 보유 중이고 수익률 -3% 이하인 종목 → drops에 반드시 포함 (손실 확대 방지)
+- 보유 중이고 모멘텀을 잃은 종목 (거래량 감소 + 횡보) → drops에 포함
+- 보유 중이고 수익 중인 종목은 유지 (drops에 넣지 마세요)
+
+신규 종목 선별 기준:
+- 거래량 급증 + 등락률 +1~4% (상승 초기)
+- 등락률 +7% 이상 급등 종목은 제외 (고점 매수 위험)
+- 등락률 -5% 이하 급락 종목은 제외 (하락 추세)
 
 반드시 아래 JSON 형식으로만 응답하세요:
-{"picks": [{"symbol": "종목코드", "reason": "선별 사유"}], "drops": ["제거할종목코드1", "제거할종목코드2"], "market_sentiment": "bullish 또는 bearish 또는 neutral", "summary": "시장 분위기 한줄 요약"}
+{"picks": [{"symbol": "종목코드", "reason": "선별 사유"}], "drops": ["제거할종목코드1"], "market_sentiment": "bullish 또는 bearish 또는 neutral", "summary": "시장 분위기 한줄 요약"}
 
-picks는 최대 5개, drops는 더 이상 유망하지 않은 기존 종목만 포함하세요."""
+picks는 최대 5개. drops는 손실 종목이나 모멘텀 상실 종목만 포함. 보유 종목 현황이 있으면 반드시 참고하세요."""
 
 
 class StockScanner:
@@ -76,10 +84,11 @@ class StockScanner:
             logger.error("거래량 상위 종목 조회 실패: %s", e)
             return []
 
-    def scan_and_select(self, rotate: bool = False) -> list[dict]:
+    def scan_and_select(self, rotate: bool = False, positions: list = None) -> list[dict]:
         """거래량 상위 종목을 AI로 분석하여 유망 종목을 선별한다.
 
         rotate=True이면 기존 watchlist 종목도 재평가하여 drops를 반환한다.
+        positions: 보유 종목 리스트 (로테이션 시 손익 정보 전달용)
         """
         self.last_drops = []
 
@@ -109,13 +118,15 @@ class StockScanner:
 
         # AI에게 전달할 데이터 구성
         if rotate:
-            prompt = self._build_rotate_prompt(volume_rank, current_watchlist)
+            sys_prompt = ROTATE_SYSTEM_PROMPT
+            prompt = self._build_rotate_prompt(volume_rank, current_watchlist, positions)
         else:
+            sys_prompt = SCAN_SYSTEM_PROMPT
             prompt = self._build_scan_prompt(volume_rank, current_watchlist)
 
         # AI 호출
         try:
-            response = self._call_ai(prompt)
+            response = self._call_ai(prompt, sys_prompt=sys_prompt)
             picks = self._parse_scan_response(response)
             if rotate:
                 self.last_drops = self._parse_drops(response)
@@ -183,7 +194,7 @@ class StockScanner:
 
         try:
             sys_prompt = ROTATE_SYSTEM_PROMPT if rotate else SCAN_SYSTEM_PROMPT
-            response = self._call_ai(prompt)
+            response = self._call_ai(prompt, sys_prompt=sys_prompt)
             picks = self._parse_scan_response(response)
             if rotate:
                 self.last_drops = self._parse_drops(response)
@@ -221,7 +232,7 @@ class StockScanner:
         lines.append("\n위 데이터를 분석하여 단기 매매에 유망한 종목을 선별해주세요.")
         return "\n".join(lines)
 
-    def _build_rotate_prompt(self, volume_rank: list[dict], current_watchlist: list[str]) -> str:
+    def _build_rotate_prompt(self, volume_rank: list[dict], current_watchlist: list[str], positions: list = None) -> str:
         """로테이션용 프롬프트 — 기존 종목 재평가 + 신규 추천."""
         lines = ["[거래량 상위 20 종목]"]
         lines.append("종목코드 | 종목명 | 현재가 | 등락률 | 거래량 | 거래대금")
@@ -233,10 +244,24 @@ class StockScanner:
                 f"{item['volume']} | {item['amount']}"
             )
 
+        # 보유 종목 손익 현황 (핵심 정보)
+        if positions:
+            lines.append("\n[현재 보유 종목 손익 현황]")
+            lines.append("종목코드 | 종목명 | 매수가 | 현재가 | 수익률 | 수량")
+            lines.append("-" * 60)
+            for pos in positions:
+                lines.append(
+                    f"{pos.symbol} | {pos.name} | {pos.avg_price:,.0f} | "
+                    f"{pos.current_price:,.0f} | {pos.pnl_pct:+.1f}% | {pos.qty}"
+                )
+            loss_positions = [p for p in positions if p.pnl_pct <= -3]
+            if loss_positions:
+                loss_names = ", ".join(f"{p.symbol}({p.pnl_pct:+.1f}%)" for p in loss_positions)
+                lines.append(f"⚠ 손실 종목: {loss_names} → drops에 포함을 강력 권장")
+
         if current_watchlist:
             lines.append(f"\n[현재 감시 중인 종목]: {', '.join(current_watchlist)}")
-            lines.append("기존 종목 중 모멘텀을 잃었거나 거래량이 급감한 종목은 drops에 넣어주세요.")
-            lines.append("거래량 상위에서 신규 유망 종목은 picks에 넣어주세요.")
+            lines.append("손실 중인 보유 종목은 drops에, 신규 유망 종목은 picks에 넣어주세요.")
         else:
             lines.append("\n감시 종목이 없습니다. 신규 유망 종목을 picks에 넣어주세요.")
 
@@ -256,8 +281,11 @@ class StockScanner:
         except (json.JSONDecodeError, KeyError):
             return []
 
-    def _call_ai(self, prompt: str) -> str:
+    def _call_ai(self, prompt: str, sys_prompt: str = "") -> str:
         """AI API를 호출한다 (rate limit 방어 + 429 재시도)."""
+        if not sys_prompt:
+            sys_prompt = SCAN_SYSTEM_PROMPT
+
         # Gemini 무료 tier: 15 RPM → 최소 5초 간격
         if self.ai_provider == "gemini":
             now = time.time()
@@ -268,7 +296,7 @@ class StockScanner:
         delays = [10, 30, 60]
         for attempt in range(3):
             try:
-                result = self._call_ai_once(prompt)
+                result = self._call_ai_once(prompt, sys_prompt)
                 self._last_ai_call = time.time()
                 return result
             except Exception as e:
@@ -278,7 +306,7 @@ class StockScanner:
                 else:
                     raise
 
-    def _call_ai_once(self, prompt: str) -> str:
+    def _call_ai_once(self, prompt: str, sys_prompt: str) -> str:
         """AI API 1회 호출."""
         if self.ai_provider == "gemini":
             from google import genai
@@ -289,7 +317,7 @@ class StockScanner:
                 model=self.ai_model or "gemini-2.5-flash-lite",
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction=SCAN_SYSTEM_PROMPT,
+                    system_instruction=sys_prompt,
                     max_output_tokens=512,
                 ),
             )
@@ -300,7 +328,7 @@ class StockScanner:
             message = client.messages.create(
                 model=self.ai_model or "claude-haiku-4-5-20250514",
                 max_tokens=512,
-                system=SCAN_SYSTEM_PROMPT,
+                system=sys_prompt,
                 messages=[{"role": "user", "content": prompt}],
             )
             return message.content[0].text
@@ -310,7 +338,7 @@ class StockScanner:
             response = client.chat.completions.create(
                 model=self.ai_model or "gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": SCAN_SYSTEM_PROMPT},
+                    {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=512,

@@ -194,8 +194,9 @@ class TradingJobs:
         except Exception:
             total_pnl = 0
 
-        win_count = sum(1 for t in trades if t.get("side") == "sell" and t.get("success"))
-        loss_count = total_trades - win_count
+        sell_trades = [t for t in trades if t.get("side") == "sell" and t.get("success")]
+        win_count = sum(1 for t in sell_trades if t.get("strategy") != "stop_loss")
+        loss_count = sum(1 for t in sell_trades if t.get("strategy") == "stop_loss")
 
         self.db.save_daily_summary(total_trades, total_pnl, win_count, loss_count)
         self.notifier.notify_daily_summary(total_trades, total_pnl, positions, cash_info=cash_info)
@@ -220,23 +221,27 @@ class TradingJobs:
     # ── 해외 장 작업 ──────────────────────────────────────
 
     def job_kr_watchlist_rotate(self):
-        """장중 종목 로테이션 (매 2시간) — 모멘텀 잃은 종목 교체."""
+        """장중 종목 로테이션 (매 1~2시간) — 모멘텀 잃은 종목 교체."""
         if not self.scanner:
             return
         logger.info("--- 국내 종목 로테이션 ---")
 
-        # 보유 종목 조회 (보호 대상)
+        # 보유 종목 조회 (보호 대상 + 손익 정보)
         held_symbols: set[str] = set()
+        positions: list = []
         try:
             positions = self.kis.get_kr_balance()
             held_symbols = {p.symbol for p in positions if p.qty > 0}
             if held_symbols:
-                logger.info("보유 종목 (보호): %s", ", ".join(held_symbols))
+                for p in positions:
+                    if p.qty > 0:
+                        logger.info("보유: %s %s | 수익률: %+.1f%%", p.symbol, p.name, p.pnl_pct)
         except Exception as e:
             logger.warning("보유 종목 조회 실패 — 로테이션 계속: %s", e)
 
         try:
-            picks = self.scanner.scan_and_select(rotate=True)
+            held_positions = [p for p in positions if p.qty > 0] if positions else None
+            picks = self.scanner.scan_and_select(rotate=True, positions=held_positions)
             drops = self.scanner.last_drops
 
             # 비보유 종목만 제거
@@ -375,18 +380,18 @@ class TradingJobs:
         except Exception as e:
             logger.error("미체결 주문 체크 실패: %s", e)
 
-        # 거래 가능 여부 확인 (연속 손절 쿨다운, 일일 최대 손실)
-        can_trade, reason = self.risk.can_trade()
-        if not can_trade:
-            logger.warning("거래 중단: %s", reason)
-            return
-
         try:
             if market == "KR":
                 positions = self.kis.get_kr_balance()
             else:
                 positions = self.kis.get_us_balance()
 
+            # executor 잔고 캐시 갱신 (매도 시 손익 조회용)
+            self.executor._balance_cache[market] = positions
+            from datetime import datetime as _dt
+            self.executor._balance_cache_time = _dt.now()
+
+            # 손절/익절 매도는 항상 실행 (거래 제한과 무관)
             checks = self.risk.check_positions(positions)
 
             for pos in checks["stop_loss"]:
@@ -395,7 +400,12 @@ class TradingJobs:
             for pos in checks["take_profit"]:
                 self.executor.execute_take_profit(pos.symbol, pos.market, pos.qty)
 
-            # 분할 매수 2단계 체크
+            # 분할 매수는 거래 가능 상태일 때만
+            can_trade, reason = self.risk.can_trade()
+            if not can_trade:
+                logger.warning("매수 중단 (매도는 정상 실행): %s", reason)
+                return
+
             for symbol, stage_info in list(self.executor._position_stages.items()):
                 if stage_info.get("market") != market or stage_info.get("stage", 0) >= 2:
                     continue

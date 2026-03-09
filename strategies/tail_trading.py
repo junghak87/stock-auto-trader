@@ -177,7 +177,15 @@ class TailTradingStrategy(BaseStrategy):
     def aggregate_to_5min(df_1min: pd.DataFrame) -> pd.DataFrame:
         """1분봉 DataFrame을 5분봉으로 변환한다."""
         df = df_1min.copy()
-        df["datetime"] = pd.to_datetime(df["date"], format="%Y%m%d %H%M%S")
+        # 키움: "HHMMSS" (시각만), KIS: "YYYYMMDD HHMMSS"
+        sample = str(df["date"].iloc[0]).strip()
+        if len(sample) <= 6:
+            # 키움 분봉: 시각만 → 오늘 날짜 붙이기
+            from datetime import datetime as dt
+            today = dt.now().strftime("%Y%m%d")
+            df["datetime"] = pd.to_datetime(today + " " + df["date"].astype(str).str.strip(), format="%Y%m%d %H%M%S")
+        else:
+            df["datetime"] = pd.to_datetime(df["date"], format="%Y%m%d %H%M%S")
         df = df.set_index("datetime").sort_index()
 
         df_5min = df.resample("5min").agg({

@@ -81,6 +81,21 @@ class TradingExecutor:
         positions = self._get_cached_positions(market)
         return any(p.symbol == symbol and p.qty > 0 for p in positions)
 
+    def _resolve_name(self, symbol: str, market: str) -> str:
+        """종목명을 조회한다 (캐시 잔고 → 시세 API 순)."""
+        # 1) 캐시된 잔고에서 찾기
+        for p in self._balance_cache.get(market, []):
+            if p.symbol == symbol and p.name:
+                return p.name
+        # 2) 시세 API로 조회
+        try:
+            if market == "KR":
+                return self.quote.get_kr_price(symbol).name
+            else:
+                return self.quote.get_us_price(symbol).name
+        except Exception:
+            return ""
+
     def execute_signal(self, symbol: str, market: str, result: StrategyResult) -> OrderResult | None:
         """전략 시그널에 따라 주문을 실행한다."""
         if result.signal == Signal.HOLD:
@@ -95,15 +110,17 @@ class TradingExecutor:
             logger.debug("보유 중 종목 매수 시그널 무시: %s", symbol)
             return None
 
-        # 거래 가능 여부 확인
-        can_trade, reason = self.risk.can_trade()
-        if not can_trade:
-            logger.warning("거래 불가: %s", reason)
-            self.notifier.notify_error(f"거래 불가: {reason}")
-            return None
+        # 거래 가능 여부 확인 (매수만 제한, 매도는 항상 허용)
+        if result.signal == Signal.BUY:
+            can_trade, reason = self.risk.can_trade()
+            if not can_trade:
+                logger.warning("매수 불가: %s", reason)
+                self.notifier.notify_error(f"매수 불가: {reason}")
+                return None
 
         # 시그널 알림
-        self.notifier.notify_signal(symbol, market, result.strategy_name, result.signal.value, result.detail)
+        name = self._resolve_name(symbol, market)
+        self.notifier.notify_signal(symbol, market, result.strategy_name, result.signal.value, result.detail, name=name)
         self.db.save_signal(symbol, market, result.strategy_name, result.signal.value, result.strength, result.detail)
 
         if result.signal == Signal.BUY:
@@ -197,6 +214,8 @@ class TradingExecutor:
                 order = self.kis.sell_us(symbol, held.qty, price=0)  # 시장가 매도
 
             self._log_order(order, market, result.strategy_name)
+            if order.success:
+                self._position_stages.pop(symbol, None)
             return order
 
         except Exception as e:
@@ -314,6 +333,7 @@ class TradingExecutor:
         for key, info in list(self._pending_orders.items()):
             elapsed = (now - info["placed_at"]).total_seconds()
             if elapsed >= self.limit_order_timeout_sec:
+                cancelled = False
                 try:
                     if info["market"] == "KR":
                         cancel_result = self.kis.cancel_kr(
@@ -322,15 +342,17 @@ class TradingExecutor:
                             qty=info["qty"],
                         )
                         if cancel_result.success:
-                            logger.info("지정가 주문 취소 (타임아웃): %s %s %d주 @ %,d",
-                                        info["side"], info["symbol"], info["qty"], info["price"])
+                            cancelled = True
+                            logger.info("지정가 주문 취소 (타임아웃): %s %s %d주 @ %s",
+                                        info["side"], info["symbol"], info["qty"], f"{info['price']:,}")
                             self.notifier.notify_system(
                                 f"지정가 주문 취소: {info['symbol']} {info['qty']}주 "
                                 f"@ {info['price']:,} ({elapsed:.0f}초 미체결)"
                             )
                 except Exception as e:
                     logger.error("주문 취소 실패: %s — %s", info["symbol"], e)
-                del self._pending_orders[key]
+                if cancelled:
+                    del self._pending_orders[key]
 
     @staticmethod
     def _round_kr_tick(price: int) -> int:
@@ -344,6 +366,7 @@ class TradingExecutor:
         """주문 결과를 DB에 기록하고 텔레그램으로 알린다."""
         # 시장가 주문(price=0)일 때 실제 체결가를 조회하여 기록
         actual_price = order.price
+        name = self._resolve_name(order.symbol, market)
         if order.success and order.price == 0:
             try:
                 if market == "KR":
@@ -351,12 +374,24 @@ class TradingExecutor:
                 else:
                     p = self.quote.get_us_price(order.symbol)
                 actual_price = p.price
+                if not name:
+                    name = p.name
             except Exception:
                 pass
 
+        # 매도 시 손익 정보 조회 (캐시된 잔고에서)
+        avg_price, pnl, pnl_pct = 0.0, 0.0, 0.0
+        if order.side == "sell" and order.success:
+            for pos in self._balance_cache.get(market, []):
+                if pos.symbol == order.symbol:
+                    avg_price = pos.avg_price
+                    pnl = pos.pnl
+                    pnl_pct = pos.pnl_pct
+                    break
+
         self.db.save_trade(
             symbol=order.symbol,
-            name="",
+            name=name,
             market=market,
             side=order.side,
             qty=order.qty,
@@ -366,6 +401,7 @@ class TradingExecutor:
             success=order.success,
             message=order.message,
         )
+        usd_krw = getattr(self.risk, "usd_krw_rate", 0) if market == "US" else 0
         self.notifier.notify_order(
             symbol=order.symbol,
             side=order.side,
@@ -373,8 +409,20 @@ class TradingExecutor:
             price=actual_price,
             success=order.success,
             message=order.message,
+            name=name,
+            strategy=strategy,
+            avg_price=avg_price,
+            pnl=pnl,
+            pnl_pct=pnl_pct,
+            market=market,
+            usd_krw_rate=usd_krw,
         )
         if order.success:
-            logger.info("주문 체결: %s %s %d주 @ %s [%s]", order.side, order.symbol, order.qty, actual_price, strategy)
+            if order.side == "sell" and avg_price > 0:
+                pnl_unit = "$" if market == "US" else "원"
+                logger.info("주문 체결: %s %s %d주 @ %s [%s] 손익: %+,.0f%s (%+.1f%%)",
+                            order.side, order.symbol, order.qty, actual_price, strategy, pnl, pnl_unit, pnl_pct)
+            else:
+                logger.info("주문 체결: %s %s %d주 @ %s [%s]", order.side, order.symbol, order.qty, actual_price, strategy)
         else:
             logger.error("주문 실패: %s %s — %s", order.side, order.symbol, order.message)

@@ -268,11 +268,11 @@ def setup_scheduler(jobs: TradingJobs, supported_markets: list[str]) -> Backgrou
         )
         scheduler.add_job(
             jobs.job_kr_tail_trading,
-            CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/3"),
+            CronTrigger(day_of_week="mon-fri", hour="9-15", minute="3,6,9,12,18,21,24,27,33,36,39,42,48,51,54,57"),
         )
         scheduler.add_job(
             jobs.job_kr_watchlist_rotate,
-            CronTrigger(day_of_week="mon-fri", hour="9,11,13", minute=30),
+            CronTrigger(day_of_week="mon-fri", hour="9,10,11,12,13,14", minute=30),
         )
         scheduler.add_job(jobs.job_kr_market_close, CronTrigger(day_of_week="mon-fri", hour=15, minute=40))
 
@@ -297,7 +297,7 @@ def setup_scheduler(jobs: TradingJobs, supported_markets: list[str]) -> Backgrou
         )
         scheduler.add_job(
             jobs.job_us_watchlist_rotate,
-            CronTrigger(day_of_week="tue-sat", hour="1,3", minute=30),
+            CronTrigger(day_of_week="tue-sat", hour="0,1,2,3,4", minute=30),
         )
         scheduler.add_job(jobs.job_us_market_close, CronTrigger(day_of_week="tue-sat", hour=6, minute=10))
     else:
