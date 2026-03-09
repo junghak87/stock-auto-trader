@@ -161,7 +161,11 @@ class TelegramNotifier:
             total_stock_pnl = sum(p.pnl for p in positions)
             for p in positions[:10]:
                 pnl_sign = "+" if p.pnl_pct >= 0 else ""
-                msg += f"  {p.symbol} {p.name}: {p.qty}주 ({pnl_sign}{p.pnl_pct:.1f}%) {p.pnl:+,.0f}원\n"
+                if p.market == "US":
+                    pnl_str = f"${p.pnl:+,.2f}"
+                else:
+                    pnl_str = f"{p.pnl:+,.0f}원"
+                msg += f"  {p.symbol} {p.name}: {p.qty}주 ({pnl_sign}{p.pnl_pct:.1f}%) {pnl_str}\n"
             if len(positions) > 10:
                 msg += f"  ... 외 {len(positions) - 10}개\n"
             msg += f"  <b>보유 합계: {total_stock_pnl:+,.0f}원</b>\n"

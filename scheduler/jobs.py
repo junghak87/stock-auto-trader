@@ -239,24 +239,44 @@ class TradingJobs:
         except Exception as e:
             logger.warning("보유 종목 조회 실패 — 로테이션 계속: %s", e)
 
+        # executor 잔고 캐시 갱신 (로테이션 매도 시 보유 확인용)
+        if positions:
+            from datetime import datetime as _dt
+            self.executor._balance_cache["KR"] = positions
+            self.executor._balance_cache_time = _dt.now()
+
         try:
             held_positions = [p for p in positions if p.qty > 0] if positions else None
             picks = self.scanner.scan_and_select(rotate=True, positions=held_positions)
             drops = self.scanner.last_drops
 
-            # 비보유 종목만 제거
+            # drops 처리: 비보유 → 워치리스트 제거, 보유 → 매도 실행
             removed = []
+            sold = []
             for symbol in drops:
                 if symbol not in held_symbols:
                     self.db.remove_watchlist(symbol, "KR")
                     removed.append(symbol)
                 else:
-                    logger.info("[%s] 보유 중 — 제거 보호", symbol)
+                    # 보유 중인 손실 종목 → 매도 실행
+                    pos = next((p for p in positions if p.symbol == symbol and p.qty > 0), None)
+                    if pos:
+                        logger.warning("[%s] 로테이션 매도: %s (수익률: %+.1f%%)", symbol, pos.name, pos.pnl_pct)
+                        from strategies.base import Signal, StrategyResult
+                        sell_result = StrategyResult(
+                            signal=Signal.SELL, strength=0.7,
+                            strategy_name="rotation_drop",
+                            detail=f"AI 로테이션 매도 (수익률: {pos.pnl_pct:+.1f}%)",
+                        )
+                        self.executor.execute_signal(symbol, "KR", sell_result)
+                        sold.append(f"{symbol}({pos.pnl_pct:+.1f}%)")
 
             msg_parts = []
             if picks:
                 names = ", ".join(p["symbol"] for p in picks)
                 msg_parts.append(f"+{len(picks)} ({names})")
+            if sold:
+                msg_parts.append(f"매도 {', '.join(sold)}")
             if removed:
                 msg_parts.append(f"-{len(removed)} ({', '.join(removed)})")
             if msg_parts:
@@ -267,36 +287,58 @@ class TradingJobs:
             logger.error("종목 로테이션 실패: %s", e)
 
     def job_us_watchlist_rotate(self):
-        """해외 장중 종목 로테이션 (매 2시간)."""
+        """해외 장중 종목 로테이션 (매 1시간)."""
         if not self.scanner:
             return
         logger.info("--- 해외 종목 로테이션 ---")
 
         held_symbols: set[str] = set()
+        positions: list = []
         try:
             positions = self.kis.get_us_balance()
             held_symbols = {p.symbol for p in positions if p.qty > 0}
             if held_symbols:
-                logger.info("보유 종목 (보호): %s", ", ".join(held_symbols))
+                for p in positions:
+                    if p.qty > 0:
+                        logger.info("보유: %s %s | 수익률: %+.1f%%", p.symbol, p.name, p.pnl_pct)
         except Exception as e:
             logger.warning("보유 종목 조회 실패 — 로테이션 계속: %s", e)
+
+        # executor 잔고 캐시 갱신 (로테이션 매도 시 보유 확인용)
+        if positions:
+            from datetime import datetime as _dt
+            self.executor._balance_cache["US"] = positions
+            self.executor._balance_cache_time = _dt.now()
 
         try:
             picks = self.scanner.scan_us_and_select(rotate=True)
             drops = self.scanner.last_drops
 
             removed = []
+            sold = []
             for symbol in drops:
                 if symbol not in held_symbols:
                     self.db.remove_watchlist(symbol, "US")
                     removed.append(symbol)
                 else:
-                    logger.info("[%s] 보유 중 — 제거 보호", symbol)
+                    pos = next((p for p in positions if p.symbol == symbol and p.qty > 0), None)
+                    if pos:
+                        logger.warning("[%s] 로테이션 매도: %s (수익률: %+.1f%%)", symbol, pos.name, pos.pnl_pct)
+                        from strategies.base import Signal, StrategyResult
+                        sell_result = StrategyResult(
+                            signal=Signal.SELL, strength=0.7,
+                            strategy_name="rotation_drop",
+                            detail=f"AI 로테이션 매도 (수익률: {pos.pnl_pct:+.1f}%)",
+                        )
+                        self.executor.execute_signal(symbol, "US", sell_result)
+                        sold.append(f"{symbol}({pos.pnl_pct:+.1f}%)")
 
             msg_parts = []
             if picks:
                 names = ", ".join(p["symbol"] for p in picks)
                 msg_parts.append(f"+{len(picks)} ({names})")
+            if sold:
+                msg_parts.append(f"매도 {', '.join(sold)}")
             if removed:
                 msg_parts.append(f"-{len(removed)} ({', '.join(removed)})")
             if msg_parts:
@@ -387,17 +429,22 @@ class TradingJobs:
                 positions = self.kis.get_us_balance()
 
             # executor 잔고 캐시 갱신 (매도 시 손익 조회용)
-            self.executor._balance_cache[market] = positions
             from datetime import datetime as _dt
+            self.executor._balance_cache[market] = positions
             self.executor._balance_cache_time = _dt.now()
 
             # 손절/익절 매도는 항상 실행 (거래 제한과 무관)
             checks = self.risk.check_positions(positions)
 
+            stop_symbols = set()
             for pos in checks["stop_loss"]:
                 self.executor.execute_stop_loss(pos.symbol, pos.market, pos.qty)
+                stop_symbols.add(pos.symbol)
 
             for pos in checks["take_profit"]:
+                if pos.symbol in stop_symbols:
+                    logger.info("[%s] 이미 손절 실행됨 — 익절 스킵", pos.symbol)
+                    continue
                 self.executor.execute_take_profit(pos.symbol, pos.market, pos.qty)
 
             # 분할 매수는 거래 가능 상태일 때만

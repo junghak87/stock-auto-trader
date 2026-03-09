@@ -191,13 +191,6 @@ class TradingExecutor:
             self.notifier.notify_error(f"매수 주문 실패: {symbol} -- {e}")
             return None
 
-    def _get_us_positions_single(self, exchange: str) -> list:
-        """US 잔고를 조회한다 (exchange 파라미터는 호환성을 위해 남겨둠)."""
-        try:
-            return self.kis.get_us_balance()
-        except Exception:
-            return []
-
     def _execute_sell(self, symbol: str, market: str, result: StrategyResult) -> OrderResult | None:
         """매도 주문을 실행한다 (보유 중인 경우에만)."""
         try:
