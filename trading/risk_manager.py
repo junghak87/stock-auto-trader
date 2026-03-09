@@ -54,6 +54,8 @@ class RiskManager:
         self.usd_krw_rate = usd_krw_rate
         # 종목별 동적 손절/익절 캐시 {symbol: (stop_loss_pct, take_profit_pct)}
         self._dynamic_thresholds: dict[str, tuple[float, float]] = {}
+        # 본전 스톱 설정된 종목 (update_dynamic_thresholds에서 보호)
+        self._breakeven_symbols: set[str] = set()
         # 트레일링 스탑: 종목별 고점 가격 추적 {symbol: highest_price}
         self._high_watermarks: dict[str, float] = {}
         # 포트폴리오 리스크: 연속 손절 추적
@@ -221,6 +223,9 @@ class RiskManager:
         변동성이 큰 종목: 넓은 손절/익절 (빈번한 손절 방지)
         변동성이 작은 종목: 좁은 손절/익절 (수익 확보)
         """
+        # 본전 스톱이 설정된 종목은 손절 비율을 유지
+        if symbol in self._breakeven_symbols:
+            return
         if len(df) < 20:
             return
 
@@ -250,7 +255,13 @@ class RiskManager:
         current = self._dynamic_thresholds.get(symbol, (self.stop_loss_pct, self.take_profit_pct))
         # 손절을 0.5%로 설정 (매입가 근처, 수수료 고려)
         self._dynamic_thresholds[symbol] = (0.5, current[1])
+        self._breakeven_symbols.add(symbol)
         logger.info("본전 스톱 설정: %s — 손절=-0.5%% (분할 익절 잔여분 보호)", symbol)
+
+    def clear_breakeven_stop(self, symbol: str):
+        """포지션 청산 시 본전 스톱을 해제한다."""
+        self._breakeven_symbols.discard(symbol)
+        self._dynamic_thresholds.pop(symbol, None)
 
     def _get_thresholds(self, symbol: str) -> tuple[float, float]:
         """종목의 손절/익절 비율을 반환한다 (동적 > 기본값)."""

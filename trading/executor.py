@@ -209,6 +209,7 @@ class TradingExecutor:
             self._log_order(order, market, result.strategy_name)
             if order.success:
                 self._position_stages.pop(symbol, None)
+                self.risk.clear_breakeven_stop(symbol)
             return order
 
         except Exception as e:
@@ -228,6 +229,7 @@ class TradingExecutor:
             if order.success:
                 self.risk.record_stop_loss()
                 self._position_stages.pop(symbol, None)
+                self.risk.clear_breakeven_stop(symbol)
             return order
         except Exception as e:
             logger.error("손절 매도 실패: %s — %s", symbol, e)
@@ -249,6 +251,7 @@ class TradingExecutor:
             else:
                 sell_qty = qty
                 self._position_stages.pop(symbol, None)
+                self.risk.clear_breakeven_stop(symbol)
 
             # 지정가 익절 (KR만, 현재가 대비 +offset%, 모의투자: offset=0 즉시 체결)
             if market == "KR" and self.limit_order_enabled:
