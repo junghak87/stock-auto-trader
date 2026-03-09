@@ -80,6 +80,10 @@ class TradingJobs:
         # AI 종목 스캔 (매일 초기화 후 재스캔)
         if self.scanner:
             try:
+                # 시장 지수 컨텍스트를 스캐너에 전달
+                ctx = self._fetch_kr_market_context()
+                if ctx:
+                    self.scanner.set_market_context(ctx)
                 self.db.clear_ai_watchlist("KR")
                 picks = self.scanner.scan_and_select()
                 if picks:
@@ -225,6 +229,11 @@ class TradingJobs:
         if not self.scanner:
             return
         logger.info("--- 국내 종목 로테이션 ---")
+
+        # 시장 지수 컨텍스트 갱신
+        ctx = self._fetch_kr_market_context()
+        if ctx:
+            self.scanner.set_market_context(ctx)
 
         # 보유 종목 조회 (보호 대상 + 손익 정보)
         held_symbols: set[str] = set()
