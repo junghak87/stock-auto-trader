@@ -77,9 +77,11 @@ class AIStrategy(BaseStrategy):
                 detail="데이터 부족 (최소 26일 필요)",
             )
 
-        # 캐시 키: 최신 일봉 날짜 + 시가 (시가는 장중 불변 → 하루 1회 AI 호출)
+        # 캐시 키: 최신 일봉 날짜 + 시가 + 1시간 블록 (장중 매시간 재판단)
         latest = df.iloc[-1]
-        cache_key = f"{latest['date']}_{latest['open']}"
+        from datetime import datetime as _dt
+        hour_block = _dt.now().hour  # 매시간 새 블록
+        cache_key = f"{latest['date']}_{latest['open']}_{hour_block}"
         if cache_key in self._cache:
             cached = self._cache[cache_key]
             logger.debug("AI 캐시 히트: %s → %s (%.2f)", cache_key, cached.signal.value, cached.strength)

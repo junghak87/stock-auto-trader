@@ -136,8 +136,8 @@ class CompositeStrategy(BaseStrategy):
                     detail=f"AI 거부권 (기술지표 매도 but AI 매수) [{details}]",
                 )
 
-        # AI 단독 매매: AI 확신도 >= 0.8이면 다른 전략 동의 없이 시그널 발생
-        if ai_result and ai_result.signal != Signal.HOLD and ai_result.strength >= 0.8:
+        # AI 단독 매매: AI 확신도 >= 0.6이면 다른 전략 동의 없이 시그널 발생
+        if ai_result and ai_result.signal != Signal.HOLD and ai_result.strength >= 0.6:
             logger.info("AI 단독 매매: %s (강도: %.2f)", ai_result.signal.value, ai_result.strength)
             return StrategyResult(
                 signal=ai_result.signal,
@@ -146,8 +146,14 @@ class CompositeStrategy(BaseStrategy):
                 detail=f"AI 단독 {ai_result.signal.value} (강도: {ai_result.strength:.2f}) [{details}]",
             )
 
-        # 가중 점수 기반 시그널 결정 (최소 2개 전략 동의 필요)
-        if buy_ratio >= self.min_score and buy_voters >= 2:
+        # AI가 동의하면 1개 전략 동의로도 시그널 발생
+        ai_agrees_buy = ai_result and ai_result.signal == Signal.BUY and ai_result.strength > 0.1
+        ai_agrees_sell = ai_result and ai_result.signal == Signal.SELL and ai_result.strength > 0.1
+        min_voters_buy = 1 if ai_agrees_buy else 2
+        min_voters_sell = 1 if ai_agrees_sell else 2
+
+        # 가중 점수 기반 시그널 결정
+        if buy_ratio >= self.min_score and buy_voters >= min_voters_buy:
             return StrategyResult(
                 signal=Signal.BUY,
                 strength=min(1.0, buy_ratio),
@@ -155,7 +161,7 @@ class CompositeStrategy(BaseStrategy):
                 detail=f"매수 (점수: {buy_ratio:.2f}, {buy_voters}개 전략 동의) [{details}]",
             )
 
-        if sell_ratio >= self.min_score and sell_voters >= 2:
+        if sell_ratio >= self.min_score and sell_voters >= min_voters_sell:
             return StrategyResult(
                 signal=Signal.SELL,
                 strength=min(1.0, sell_ratio),
