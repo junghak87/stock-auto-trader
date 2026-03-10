@@ -8,6 +8,7 @@ import logging
 from datetime import datetime
 
 from core.broker import BrokerClient, OrderResult
+from core.kis_client import normalize_kr_symbol
 from core.database import Database
 from core.telegram_bot import TelegramNotifier
 from strategies.base import Signal, StrategyResult
@@ -98,6 +99,8 @@ class TradingExecutor:
 
     def execute_signal(self, symbol: str, market: str, result: StrategyResult) -> OrderResult | None:
         """전략 시그널에 따라 주문을 실행한다."""
+        if market == "KR":
+            symbol = normalize_kr_symbol(symbol)
         if result.signal == Signal.HOLD:
             return None
 
@@ -219,6 +222,8 @@ class TradingExecutor:
 
     def execute_stop_loss(self, symbol: str, market: str, qty: int) -> OrderResult | None:
         """손절 매도를 실행한다 (항상 시장가, 전량 매도)."""
+        if market == "KR":
+            symbol = normalize_kr_symbol(symbol)
         try:
             logger.warning("손절 매도 실행: %s %d주", symbol, qty)
             if market == "KR":
@@ -238,6 +243,8 @@ class TradingExecutor:
 
     def execute_take_profit(self, symbol: str, market: str, qty: int) -> OrderResult | None:
         """익절 매도를 실행한다 (분할 매도 + 지정가 지원)."""
+        if market == "KR":
+            symbol = normalize_kr_symbol(symbol)
         try:
             stage_info = self._position_stages.get(symbol)
 

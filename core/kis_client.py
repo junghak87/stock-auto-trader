@@ -15,6 +15,13 @@ from core.broker import StockPrice, OrderResult, Position, OHLCVData
 
 logger = logging.getLogger(__name__)
 
+
+def normalize_kr_symbol(symbol: str) -> str:
+    """국내 종목코드를 정규화한다 (예: 'A014530' → '014530')."""
+    if len(symbol) == 7 and symbol[0].isalpha() and symbol[1:].isdigit():
+        return symbol[1:]
+    return symbol
+
 TOKEN_CACHE_FILE = Path("token_cache.json")
 
 # ── 기본 URL ──────────────────────────────────────────────
@@ -413,7 +420,7 @@ class KISClient:
         results = []
         for item in data.get("output", [])[:count]:
             results.append({
-                "symbol": item.get("mksc_shrn_iscd", ""),
+                "symbol": normalize_kr_symbol(item.get("mksc_shrn_iscd", "")),
                 "name": item.get("hts_kor_isnm", ""),
                 "price": item.get("stck_prpr", "0"),
                 "change_pct": item.get("prdy_ctrt", "0"),

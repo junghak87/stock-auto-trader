@@ -349,6 +349,9 @@ class Database:
 
     def add_watchlist(self, symbol: str, market: str, name: str = "", source: str = "manual", reason: str = "") -> bool:
         """감시 종목을 추가한다. 이미 존재하면 활성화한다."""
+        # 국내 종목코드 정규화 (A014530 → 014530)
+        if market == "KR" and len(symbol) == 7 and symbol[0].isalpha() and symbol[1:].isdigit():
+            symbol = symbol[1:]
         try:
             with self._connect() as conn:
                 conn.execute(
@@ -393,7 +396,14 @@ class Database:
     def get_watchlist_symbols(self, market: str) -> list[str]:
         """활성 감시 종목의 심볼 리스트를 반환한다."""
         items = self.get_watchlist(market)
-        return [item["symbol"] for item in items]
+        symbols = []
+        for item in items:
+            sym = item["symbol"]
+            # 국내 종목코드 정규화 (A014530 → 014530)
+            if market == "KR" and len(sym) == 7 and sym[0].isalpha() and sym[1:].isdigit():
+                sym = sym[1:]
+            symbols.append(sym)
+        return symbols
 
     def clear_ai_watchlist(self, market: str | None = None):
         """AI 스캔으로 추가된 감시 종목을 비활성화한다 (매일 갱신용)."""
