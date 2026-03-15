@@ -8,6 +8,7 @@ import logging
 import time
 
 from core.broker import BrokerClient
+from core.kis_client import normalize_kr_symbol
 from core.database import Database
 from core.telegram_bot import TelegramNotifier
 from strategies.base import BaseStrategy, Signal
@@ -117,8 +118,8 @@ class TradingJobs:
             if ctx:
                 self.strategy.set_market_context(ctx)
 
-        # 종목명 매핑 (AI에게 종목/업종 정보 제공)
-        stock_names = {item["symbol"]: item.get("name", "") for item in self.db.get_watchlist("KR")}
+        # 종목명 매핑 (AI에게 종목/업종 정보 제공, 심볼 정규화)
+        stock_names = {normalize_kr_symbol(item["symbol"]): item.get("name", "") for item in self.db.get_watchlist("KR")}
 
         for symbol in self._get_kr_stocks():
             try:
@@ -247,7 +248,7 @@ class TradingJobs:
         positions: list = []
         try:
             positions = self.kis.get_kr_balance()
-            held_symbols = {p.symbol for p in positions if p.qty > 0}
+            held_symbols = {normalize_kr_symbol(p.symbol) for p in positions if p.qty > 0}
             if held_symbols:
                 for p in positions:
                     if p.qty > 0:
@@ -270,12 +271,13 @@ class TradingJobs:
             removed = []
             sold = []
             for symbol in drops:
+                symbol = normalize_kr_symbol(symbol)
                 if symbol not in held_symbols:
                     self.db.remove_watchlist(symbol, "KR")
                     removed.append(symbol)
                 else:
                     # 보유 중인 손실 종목 → 매도 실행
-                    pos = next((p for p in positions if p.symbol == symbol and p.qty > 0), None)
+                    pos = next((p for p in positions if normalize_kr_symbol(p.symbol) == symbol and p.qty > 0), None)
                     if pos:
                         logger.warning("[%s] 로테이션 매도: %s (수익률: %+.1f%%)", symbol, pos.name, pos.pnl_pct)
                         from strategies.base import Signal, StrategyResult

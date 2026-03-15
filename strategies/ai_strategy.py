@@ -88,7 +88,7 @@ class AIStrategy(BaseStrategy):
         latest = df.iloc[-1]
         from datetime import datetime as _dt
         hour_block = _dt.now().hour  # 매시간 새 블록
-        symbol_key = self._stock_symbol or f"{latest['open']}"
+        symbol_key = self._stock_symbol or "UNKNOWN"
         cache_key = f"{symbol_key}_{latest['date']}_{hour_block}"
         if cache_key in self._cache:
             cached = self._cache[cache_key]
@@ -298,8 +298,9 @@ class AIStrategy(BaseStrategy):
             cleaned = text.strip()
             if "```" in cleaned:
                 start = cleaned.find("{")
-                end = cleaned.rfind("}") + 1
-                cleaned = cleaned[start:end]
+                end = cleaned.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    cleaned = cleaned[start:end + 1]
 
             data = json.loads(cleaned)
 

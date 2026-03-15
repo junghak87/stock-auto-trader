@@ -369,6 +369,9 @@ class Database:
 
     def remove_watchlist(self, symbol: str, market: str) -> bool:
         """감시 종목을 비활성화한다."""
+        # 국내 종목코드 정규화 (A014530 → 014530)
+        if market == "KR" and len(symbol) == 7 and symbol[0].isalpha() and symbol[1:].isdigit():
+            symbol = symbol[1:]
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE watchlist SET active=0 WHERE symbol=? AND market=?",
@@ -436,7 +439,14 @@ class Database:
         - .env에 있는 종목: 활성화 (없으면 추가)
         - .env에서 제거된 config 종목: 비활성화
         """
-        config_kr = set(kr_stocks)
+        # 국내 종목코드 정규화
+        def _norm_kr(s: str) -> str:
+            if len(s) == 7 and s[0].isalpha() and s[1:].isdigit():
+                return s[1:]
+            return s
+
+        kr_stocks_norm = [_norm_kr(s) for s in kr_stocks]
+        config_kr = set(kr_stocks_norm)
         config_us = set(us_stocks)
 
         # 현재 config 소스 종목 조회
@@ -444,11 +454,11 @@ class Database:
             rows = conn.execute(
                 "SELECT symbol, market FROM watchlist WHERE source='config'",
             ).fetchall()
-        existing_config = {(r["symbol"], r["market"]) for r in rows}
+        existing_config = {(_norm_kr(r["symbol"]) if r["market"] == "KR" else r["symbol"], r["market"]) for r in rows}
 
         # .env에 있는 종목 활성화/추가
         added = 0
-        for symbol in kr_stocks:
+        for symbol in kr_stocks_norm:
             if (symbol, "KR") not in existing_config:
                 self.add_watchlist(symbol, "KR", source="config")
                 added += 1

@@ -5,6 +5,7 @@
 """
 
 import logging
+import time
 from datetime import datetime
 
 from core.broker import BrokerClient, OrderResult
@@ -356,7 +357,10 @@ class TradingExecutor:
                             )
                 except Exception as e:
                     logger.error("주문 취소 실패: %s — %s", info["symbol"], e)
-                if cancelled:
+                if cancelled or elapsed >= self.limit_order_timeout_sec * 3:
+                    # 취소 성공 또는 타임아웃 3배 초과 시 추적 포기
+                    if not cancelled:
+                        logger.warning("미체결 주문 추적 포기 (%.0f초 경과): %s", elapsed, info["symbol"])
                     del self._pending_orders[key]
 
     @staticmethod
@@ -381,6 +385,7 @@ class TradingExecutor:
                 actual_price = p.price
                 if not name:
                     name = p.name
+                time.sleep(0.15)
             except Exception:
                 pass
 

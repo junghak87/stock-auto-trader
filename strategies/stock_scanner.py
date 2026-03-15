@@ -10,6 +10,7 @@ import time
 import traceback
 
 from core.broker import BrokerClient
+from core.kis_client import normalize_kr_symbol
 from core.database import Database
 
 logger = logging.getLogger(__name__)
@@ -155,7 +156,7 @@ class StockScanner:
         # 선별된 종목을 watchlist에 추가
         added = []
         for pick in picks:
-            symbol = pick["symbol"]
+            symbol = normalize_kr_symbol(pick["symbol"])
             if symbol not in current_watchlist:
                 name = next((v["name"] for v in volume_rank if v["symbol"] == symbol), "")
                 self.db.add_watchlist(symbol, "KR", name=name, source="ai_scan", reason=pick.get("reason", ""))
@@ -320,8 +321,9 @@ class StockScanner:
             cleaned = text.strip()
             if "```" in cleaned:
                 start = cleaned.find("{")
-                end = cleaned.rfind("}") + 1
-                cleaned = cleaned[start:end]
+                end = cleaned.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    cleaned = cleaned[start:end + 1]
             data = json.loads(cleaned)
             return data.get("drops", [])
         except (json.JSONDecodeError, KeyError):
@@ -399,8 +401,9 @@ class StockScanner:
             cleaned = text.strip()
             if "```" in cleaned:
                 start = cleaned.find("{")
-                end = cleaned.rfind("}") + 1
-                cleaned = cleaned[start:end]
+                end = cleaned.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    cleaned = cleaned[start:end + 1]
 
             data = json.loads(cleaned)
             picks = data.get("picks", [])

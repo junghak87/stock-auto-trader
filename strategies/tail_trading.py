@@ -53,11 +53,11 @@ class TailTradingStrategy(BaseStrategy):
 
     def analyze(self, df: pd.DataFrame) -> StrategyResult:
         """5분봉 DataFrame을 분석하여 꼬리 매매 시그널을 반환한다."""
-        if len(df) < 3:
+        if len(df) < 4:
             return StrategyResult(
                 signal=Signal.HOLD, strength=0,
                 strategy_name=self.name,
-                detail="데이터 부족 (최소 3봉 필요)",
+                detail="데이터 부족 (최소 4봉 필요)",
             )
 
         latest = df.iloc[-1]
