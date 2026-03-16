@@ -50,8 +50,8 @@ class TradingSettings(BaseSettings):
 
     mode: str = Field(default="paper", alias="TRADING_MODE")
     total_budget: float = Field(default=0, alias="TOTAL_BUDGET")
-    stop_loss_pct: float = Field(default=5.0, alias="STOP_LOSS_PCT")
-    take_profit_pct: float = Field(default=10.0, alias="TAKE_PROFIT_PCT")
+    stop_loss_pct: float = Field(default=3.5, alias="STOP_LOSS_PCT")
+    take_profit_pct: float = Field(default=7.0, alias="TAKE_PROFIT_PCT")
     trailing_activation_pct: float = Field(default=3.0, alias="TRAILING_ACTIVATION_PCT")
     trailing_stop_pct: float = Field(default=2.0, alias="TRAILING_STOP_PCT")
     daily_max_loss_pct: float = Field(default=3.0, alias="DAILY_MAX_LOSS_PCT")
@@ -66,6 +66,8 @@ class TradingSettings(BaseSettings):
     split_buy_dip_pct: float = Field(default=2.0, alias="SPLIT_BUY_DIP_PCT")
     split_sell_enabled: bool = Field(default=True, alias="SPLIT_SELL_ENABLED")
     split_sell_first_ratio: float = Field(default=0.5, alias="SPLIT_SELL_FIRST_RATIO")
+    position_replace_enabled: bool = Field(default=True, alias="POSITION_REPLACE_ENABLED")
+    position_replace_min_strength: float = Field(default=0.6, alias="POSITION_REPLACE_MIN_STRENGTH")
     max_daily_trades: int = Field(default=20, alias="MAX_DAILY_TRADES")
     usd_krw_rate: float = Field(default=1450, alias="USD_KRW_RATE")
 

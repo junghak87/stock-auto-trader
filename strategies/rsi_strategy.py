@@ -34,25 +34,33 @@ class RSIStrategy(BaseStrategy):
 
         current_rsi = df["rsi"].iloc[-1]
         prev_rsi = df["rsi"].iloc[-2]
+        prev2_rsi = df["rsi"].iloc[-3] if len(df) >= self.period + 2 else prev_rsi
+
+        # RSI 기울기(속도): 급격한 변화일수록 시그널 강화
+        rsi_slope = abs(current_rsi - prev_rsi)
+        rsi_accel = abs(current_rsi - prev_rsi) - abs(prev_rsi - prev2_rsi)  # 가속도
+        slope_bonus = min(rsi_slope / 10.0, 0.3)  # 최대 +0.3 보너스
 
         # 과매도 탈출 → 매수
         if current_rsi > self.oversold and prev_rsi <= self.oversold:
             strength = (self.oversold - min(prev_rsi, self.oversold)) / self.oversold
+            strength = min(max(strength, 0.3) + slope_bonus, 1.0)
             return StrategyResult(
                 signal=Signal.BUY,
-                strength=min(max(strength, 0.3), 1.0),
+                strength=strength,
                 strategy_name=self.name,
-                detail=f"RSI 과매도 탈출 ({prev_rsi:.1f} → {current_rsi:.1f})",
+                detail=f"RSI 과매도 탈출 ({prev_rsi:.1f} → {current_rsi:.1f}, 기울기: {rsi_slope:.1f})",
             )
 
         # 과매수 진입 → 매도
         if current_rsi < self.overbought and prev_rsi >= self.overbought:
             strength = (max(prev_rsi, self.overbought) - self.overbought) / (100 - self.overbought)
+            strength = min(max(strength, 0.3) + slope_bonus, 1.0)
             return StrategyResult(
                 signal=Signal.SELL,
-                strength=min(max(strength, 0.3), 1.0),
+                strength=strength,
                 strategy_name=self.name,
-                detail=f"RSI 과매수 하락 ({prev_rsi:.1f} → {current_rsi:.1f})",
+                detail=f"RSI 과매수 하락 ({prev_rsi:.1f} → {current_rsi:.1f}, 기울기: {rsi_slope:.1f})",
             )
 
         # 현재 과매도 구간에 있으면 매수 대기 시그널

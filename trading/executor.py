@@ -58,13 +58,18 @@ class TradingExecutor:
         # 잔고 캐시 (매 전략 실행 사이클에서 반복 API 호출 방지)
         self._balance_cache: dict[str, list] = {}
         self._balance_cache_time: datetime | None = None
+        # 종목명 캐시 (API 호출 최소화)
+        self._name_cache: dict[str, str] = {}
+        # 포지션 교체 설정
+        self.position_replace_enabled: bool = True
+        self.replace_min_strength: float = 0.6  # 교체 시 최소 시그널 강도
 
     def _get_cached_positions(self, market: str) -> list:
-        """캐시된 잔고를 반환한다 (30초 TTL)."""
+        """캐시된 잔고를 반환한다 (30초 TTL, 마켓별 독립 만료)."""
         now = datetime.now()
-        if not self._balance_cache_time or (now - self._balance_cache_time).total_seconds() >= 30:
-            self._balance_cache.clear()
-            self._balance_cache_time = now
+        cache_age = (now - self._balance_cache_time).total_seconds() if self._balance_cache_time else float("inf")
+        if cache_age >= 30 and market in self._balance_cache:
+            del self._balance_cache[market]
 
         if market not in self._balance_cache:
             try:
@@ -73,7 +78,9 @@ class TradingExecutor:
                 else:
                     positions = self.kis.get_us_balance()
                 self._balance_cache[market] = positions
-            except Exception:
+                self._balance_cache_time = now  # 갱신 시점 기록
+            except Exception as e:
+                logger.warning("잔고 조회 실패 [%s]: %s", market, e)
                 return []
 
         return self._balance_cache.get(market, [])
@@ -83,18 +90,39 @@ class TradingExecutor:
         positions = self._get_cached_positions(market)
         return any(p.symbol == symbol and p.qty > 0 for p in positions)
 
+    def set_stock_names(self, names: dict[str, str]):
+        """종목명 매핑을 업데이트한다 (jobs에서 전략 실행 시 전달)."""
+        self._name_cache.update(names)
+
     def _resolve_name(self, symbol: str, market: str) -> str:
-        """종목명을 조회한다 (캐시 잔고 → 시세 API 순)."""
-        # 1) 캐시된 잔고에서 찾기
+        """종목명을 조회한다 (캐시 → 잔고 → DB → 시세 API 순)."""
+        # 1) 종목명 캐시
+        if symbol in self._name_cache and self._name_cache[symbol]:
+            return self._name_cache[symbol]
+        # 2) 캐시된 잔고에서 찾기
         for p in self._balance_cache.get(market, []):
             if p.symbol == symbol and p.name:
+                self._name_cache[symbol] = p.name
                 return p.name
-        # 2) 시세 API로 조회
+        # 3) DB 워치리스트에서 찾기
+        try:
+            for item in self.db.get_watchlist(market):
+                sym = item.get("symbol", "")
+                nm = item.get("name", "")
+                if sym == symbol and nm:
+                    self._name_cache[symbol] = nm
+                    return nm
+        except Exception:
+            pass
+        # 4) 시세 API로 조회
         try:
             if market == "KR":
-                return self.quote.get_kr_price(symbol).name
+                nm = self.quote.get_kr_price(symbol).name
             else:
-                return self.quote.get_us_price(symbol).name
+                nm = self.quote.get_us_price(symbol).name
+            if nm:
+                self._name_cache[symbol] = nm
+            return nm
         except Exception:
             return ""
 
@@ -121,6 +149,9 @@ class TradingExecutor:
                 logger.warning("매수 불가: %s", reason)
                 self.notifier.notify_error(f"매수 불가: {reason}")
                 return None
+            # 고변동성 종목 매수 차단 (ATR% >= 5%)
+            if self.risk.is_high_volatility(symbol):
+                return None
 
         # 시그널 알림
         name = self._resolve_name(symbol, market)
@@ -133,11 +164,93 @@ class TradingExecutor:
             return self._execute_sell(symbol, market, result)
         return None
 
+    def _try_replace_position(self, new_symbol: str, market: str, result: StrategyResult) -> OrderResult | None:
+        """현금 부족 시 가장 약한 보유 종목을 매도하고 새 종목을 매수한다.
+
+        교체 조건:
+        - 새 시그널 강도 >= replace_min_strength (0.6)
+        - 보유 종목 중 수익률이 가장 낮은 종목 선택
+        - 손실 중인 종목 우선 교체 (본전스톱 종목 제외)
+        """
+        positions = self._get_cached_positions(market)
+        if not positions:
+            return None
+
+        # 교체 후보: 보유 중이고, 본전스톱이 아닌 종목
+        candidates = [
+            p for p in positions
+            if p.qty > 0 and p.symbol != new_symbol and p.symbol not in self.risk._breakeven_symbols
+        ]
+        if not candidates:
+            return None
+
+        # 수익률이 가장 낮은 종목 선택
+        weakest = min(candidates, key=lambda p: p.pnl_pct)
+
+        # 교체 기준: 약한 종목이 손실 중이거나, 수익률이 새 시그널 강도 대비 낮을 때
+        if weakest.pnl_pct > 1.0:
+            logger.info("포지션 교체 불가 — 약한 종목도 수익 중: %s (%+.1f%%)", weakest.symbol, weakest.pnl_pct)
+            return None
+
+        weak_name = self._resolve_name(weakest.symbol, market)
+        new_name = self._resolve_name(new_symbol, market)
+        logger.info(
+            "포지션 교체: %s %s (%+.1f%%) → %s %s (강도: %.2f)",
+            weakest.symbol, weak_name, weakest.pnl_pct,
+            new_symbol, new_name, result.strength,
+        )
+        self.notifier.notify_system(
+            f"포지션 교체: {weakest.symbol} {weak_name} ({weakest.pnl_pct:+.1f}%) "
+            f"→ {new_symbol} {new_name} (강도: {result.strength:.2f})"
+        )
+
+        # 1) 약한 종목 매도
+        try:
+            if market == "KR":
+                sell_order = self.kis.sell_kr(weakest.symbol, weakest.qty, price=0)
+            else:
+                sell_order = self.kis.sell_us(weakest.symbol, weakest.qty, price=0)
+
+            if not sell_order.success:
+                logger.warning("포지션 교체 매도 실패: %s — %s", weakest.symbol, sell_order.message)
+                return None
+
+            self._log_order(sell_order, market, "position_replace_sell")
+            self.risk.clear_breakeven_stop(weakest.symbol)
+            self._position_stages.pop(weakest.symbol, None)
+
+            # 캐시 무효화
+            self.risk._cash_cache_time = None
+            if market in self._balance_cache:
+                del self._balance_cache[market]
+            time.sleep(0.3)  # 매도 체결 대기
+
+        except Exception as e:
+            logger.error("포지션 교체 매도 오류: %s — %s", weakest.symbol, e)
+            return None
+
+        # 2) 새 종목 매수
+        return self._execute_buy(new_symbol, market, result)
+
     def _execute_buy(self, symbol: str, market: str, result: StrategyResult) -> OrderResult | None:
         """매수 주문을 실행한다 (이미 보유 중이면 스킵)."""
         try:
+            # 현금 잔고 사전 확인 (불필요한 시세 API 호출 방지)
+            cash_info = self.risk._get_cash_info()
+            available_cash = cash_info.get("cash", 0)
+            min_cash = 50_000 if market == "KR" else 50  # 최소 잔고 (KR: 5만원, US: $50)
+            if available_cash < min_cash:
+                # 포지션 교체 시도: 현금 부족 + 강한 시그널 → 약한 보유 종목 매도 후 매수
+                if self.position_replace_enabled and result.strength >= self.replace_min_strength:
+                    replaced = self._try_replace_position(symbol, market, result)
+                    if replaced:
+                        return replaced
+                logger.info("현금 부족 — 매수 스킵: %s (잔고: %s)", symbol, f"{available_cash:,.0f}")
+                return None
+
             if market == "KR":
                 price_info = self.quote.get_kr_price(symbol)
+                time.sleep(0.15)
                 price = price_info.price
                 qty = self.risk.calculate_buy_qty(symbol, price, market)
                 if qty <= 0:
@@ -174,6 +287,7 @@ class TradingExecutor:
             else:
                 # US
                 price_info = self.quote.get_us_price(symbol)
+                time.sleep(0.15)
                 price = price_info.price
                 qty = self.risk.calculate_buy_qty(symbol, price, market)
                 if qty <= 0:
@@ -188,6 +302,13 @@ class TradingExecutor:
                     }
 
             self._log_order(order, market, result.strategy_name)
+
+            # 매수 성공 시 캐시 무효화 (다음 매수에서 최신 잔고 사용)
+            if order.success:
+                self.risk._cash_cache_time = None
+                if market in self._balance_cache:
+                    del self._balance_cache[market]
+
             return order
 
         except Exception as e:
@@ -295,11 +416,20 @@ class TradingExecutor:
         if not stage_info or stage_info.get("stage", 0) >= 2:
             return None
 
+        # 현금 잔고 사전 확인
+        cash_info = self.risk._get_cash_info()
+        available_cash = cash_info.get("cash", 0)
+        min_cash = 50_000 if market == "KR" else 50
+        if available_cash < min_cash:
+            logger.info("분할 매수 스킵 — 현금 부족: %s (잔고: %s)", symbol, f"{available_cash:,.0f}")
+            return None
+
         try:
             if market == "KR":
                 price_info = self.quote.get_kr_price(symbol)
             else:
                 price_info = self.quote.get_us_price(symbol)
+            time.sleep(0.15)
             current_price = price_info.price
 
             dip_threshold = stage_info["first_buy_price"] * (1 - self.split_buy_dip_pct / 100)

@@ -22,9 +22,9 @@ class TailTradingStrategy(BaseStrategy):
     def __init__(
         self,
         tail_ratio: float = 2.0,
-        volume_ratio: float = 1.5,
+        volume_ratio: float = 2.0,
         recovery_pct: float = 0.6,
-        cooldown_minutes: int = 30,
+        cooldown_minutes: int = 10,
     ):
         """
         Args:

@@ -97,15 +97,29 @@ class TradingJobs:
         self.notifier.notify_system(f"국내 감시 종목 {len(kr_stocks)}개 준비 완료")
 
     def _fetch_kr_market_context(self) -> str:
-        """KOSPI/KOSDAQ 지수를 조회하여 시장 컨텍스트 문자열을 생성한다."""
+        """KOSPI/KOSDAQ 지수를 조회하여 시장 컨텍스트 문자열을 생성하고 레짐을 갱신한다."""
         lines = ["[시장 지수]"]
+        change_pcts = {}
         for code, name in [("0001", "KOSPI"), ("1001", "KOSDAQ")]:
             try:
                 idx = self.quote.get_kr_index(code)
                 lines.append(f"{name}: {idx['price']:,.2f} ({idx['change_pct']:+.2f}%)")
+                change_pcts[name] = idx["change_pct"]
                 time.sleep(self.quote_rate_delay)
             except Exception as e:
                 logger.debug("%s 지수 조회 실패: %s", name, e)
+
+        # 시장 레짐 갱신
+        if "KOSPI" in change_pcts:
+            regime = self.risk.detect_market_regime(
+                change_pcts.get("KOSPI", 0),
+                change_pcts.get("KOSDAQ", 0),
+            )
+            lines.append(f"[레짐: {regime}]")
+            # 전략에 레짐 전달
+            if hasattr(self.strategy, 'set_regime'):
+                self.strategy.set_regime(regime)
+
         return "\n".join(lines) if len(lines) > 1 else ""
 
     def job_kr_strategy_run(self):
@@ -120,6 +134,8 @@ class TradingJobs:
 
         # 종목명 매핑 (AI에게 종목/업종 정보 제공, 심볼 정규화)
         stock_names = {normalize_kr_symbol(item["symbol"]): item.get("name", "") for item in self.db.get_watchlist("KR")}
+        # executor에도 종목명 전달 (알림에 종목명 표시)
+        self.executor.set_stock_names(stock_names)
 
         for symbol in self._get_kr_stocks():
             try:
@@ -133,6 +149,19 @@ class TradingJobs:
                     continue
                 time.sleep(self.quote_rate_delay)
 
+                # 분봉 데이터 조회 → AI에 장중 컨텍스트 전달
+                if hasattr(self.strategy, 'set_minute_data'):
+                    try:
+                        minute_data = self.quote.get_kr_minute_prices(symbol)
+                        if minute_data and len(minute_data) >= 4:
+                            minute_df = self.strategy.ohlcv_to_dataframe(minute_data)
+                            self.strategy.set_minute_data(minute_df)
+                        else:
+                            self.strategy.set_minute_data(None)
+                        time.sleep(self.quote_rate_delay)
+                    except Exception:
+                        self.strategy.set_minute_data(None)
+
                 # DataFrame 변환 후 전략 분석
                 df = self.strategy.ohlcv_to_dataframe(ohlcv)
                 result = self.strategy.analyze(df)
@@ -142,8 +171,8 @@ class TradingJobs:
 
                 logger.info("[%s] 시그널: %s (강도: %.2f) — %s", symbol, result.signal.value, result.strength, result.detail)
 
-                # 시그널이 있으면 주문 실행
-                if result.signal != Signal.HOLD and result.strength >= 0.3:
+                # 시그널이 있으면 주문 실행 (강도 0.4 이상만)
+                if result.signal != Signal.HOLD and result.strength >= 0.4:
                     self.executor.execute_signal(symbol, "KR", result)
 
                 time.sleep(self.quote_rate_delay)
@@ -402,6 +431,7 @@ class TradingJobs:
 
         # 종목명 매핑
         stock_names = {item["symbol"]: item.get("name", "") for item in self.db.get_watchlist("US")}
+        self.executor.set_stock_names(stock_names)
 
         for symbol in self._get_us_stocks():
             try:
@@ -422,7 +452,7 @@ class TradingJobs:
 
                 logger.info("[%s] 시그널: %s (강도: %.2f) — %s", symbol, result.signal.value, result.strength, result.detail)
 
-                if result.signal != Signal.HOLD and result.strength >= 0.3:
+                if result.signal != Signal.HOLD and result.strength >= 0.4:
                     self.executor.execute_signal(symbol, "US", result)
 
                 time.sleep(self.quote_rate_delay)

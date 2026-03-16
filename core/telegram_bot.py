@@ -21,8 +21,8 @@ class TelegramNotifier:
     def __init__(self, bot_token: str, chat_id: str):
         self.bot_token = bot_token
         self.chat_id = chat_id
-        self.allowed_chat_ids: set[int] = {int(chat_id)}
-        self.bot = Bot(token=bot_token)
+        self.allowed_chat_ids: set[int] = {int(chat_id)} if chat_id else set()
+        self.bot = Bot(token=bot_token) if bot_token else None
         self._app: Application | None = None
         self._kis_client = None
         self._database = None
@@ -48,6 +48,8 @@ class TelegramNotifier:
 
     async def _send(self, text: str, parse_mode: str = "HTML"):
         """텔레그램 메시지를 전송한다."""
+        if not self.bot:
+            return
         try:
             await self.bot.send_message(
                 chat_id=self.chat_id,
@@ -362,6 +364,9 @@ class TelegramNotifier:
 
     async def start_bot_polling(self):
         """텔레그램 봇 폴링을 시작한다 (별도 태스크로 실행)."""
+        if not self.bot_token:
+            logger.warning("텔레그램 봇 토큰 미설정 — 봇 폴링 스킵")
+            return
         app = Application.builder().token(self.bot_token).build()
         self.setup_bot_commands(app)
         self._app = app

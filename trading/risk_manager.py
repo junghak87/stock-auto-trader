@@ -17,9 +17,14 @@ from core.database import Database
 
 logger = logging.getLogger(__name__)
 
+# 시장 레짐 상수
+REGIME_BULL = "BULL"
+REGIME_BEAR = "BEAR"
+REGIME_SIDEWAYS = "SIDEWAYS"
+
 # ATR 기반 동적 손절/익절 배수
-ATR_STOP_LOSS_MULTIPLIER = 2.0    # ATR x 2 = 손절폭
-ATR_TAKE_PROFIT_MULTIPLIER = 3.0  # ATR x 3 = 익절폭
+ATR_STOP_LOSS_MULTIPLIER = 2.5    # ATR x 2.5 = 손절폭 (변동성 대비 여유 확보)
+ATR_TAKE_PROFIT_MULTIPLIER = 4.0  # ATR x 4 = 익절폭 (리스크:리워드 개선)
 
 
 class RiskManager:
@@ -54,6 +59,8 @@ class RiskManager:
         self.usd_krw_rate = usd_krw_rate
         # 종목별 동적 손절/익절 캐시 {symbol: (stop_loss_pct, take_profit_pct)}
         self._dynamic_thresholds: dict[str, tuple[float, float]] = {}
+        # 종목별 최근 ATR% 캐시 (고변동성 진입 차단용)
+        self._atr_pct_cache: dict[str, float] = {}
         # 본전 스톱 설정된 종목 (update_dynamic_thresholds에서 보호)
         self._breakeven_symbols: set[str] = set()
         # 트레일링 스탑: 종목별 고점 가격 추적 {symbol: highest_price}
@@ -72,6 +79,47 @@ class RiskManager:
         # 현금 잔고 캐시 (30초) — 같은 사이클 내 반복 API 호출 방지
         self._cash_cache: dict | None = None
         self._cash_cache_time: datetime | None = None
+        # 시장 레짐 상태
+        self._market_regime: str = REGIME_SIDEWAYS
+        self._regime_history: list[dict] = []  # 최근 지수 등락률 기록
+
+    def detect_market_regime(self, kospi_change_pct: float, kosdaq_change_pct: float) -> str:
+        """KOSPI/KOSDAQ 등락률 기반으로 시장 레짐을 판별한다.
+
+        누적 등락률 히스토리(최근 3회)를 기반으로 추세를 판단한다.
+        - BULL: 평균 등락률 > +0.3%
+        - BEAR: 평균 등락률 < -0.3%
+        - SIDEWAYS: 그 외
+        """
+        avg_change = (kospi_change_pct + kosdaq_change_pct) / 2
+        self._regime_history.append({
+            "kospi": kospi_change_pct,
+            "kosdaq": kosdaq_change_pct,
+            "avg": avg_change,
+        })
+        # 최근 3회분만 유지
+        if len(self._regime_history) > 3:
+            self._regime_history = self._regime_history[-3:]
+
+        # 평균 등락률로 레짐 판단
+        recent_avg = sum(r["avg"] for r in self._regime_history) / len(self._regime_history)
+
+        if recent_avg > 0.3:
+            regime = REGIME_BULL
+        elif recent_avg < -0.3:
+            regime = REGIME_BEAR
+        else:
+            regime = REGIME_SIDEWAYS
+
+        if regime != self._market_regime:
+            logger.info("시장 레짐 전환: %s → %s (평균 등락률: %+.2f%%)", self._market_regime, regime, recent_avg)
+        self._market_regime = regime
+        return regime
+
+    @property
+    def market_regime(self) -> str:
+        """현재 시장 레짐을 반환한다."""
+        return self._market_regime
 
     def can_trade(self) -> tuple[bool, str]:
         """현재 거래가 가능한 상태인지 확인한다."""
@@ -101,6 +149,14 @@ class RiskManager:
             return False, reason
 
         return True, "거래 가능"
+
+    def is_high_volatility(self, symbol: str, threshold: float = 5.0) -> bool:
+        """종목의 ATR%가 임계값을 초과하는지 확인한다 (고변동성 매수 차단)."""
+        atr_pct = self._atr_pct_cache.get(symbol, 0)
+        if atr_pct >= threshold:
+            logger.warning("고변동성 매수 차단: %s (ATR=%.1f%% >= %.1f%%)", symbol, atr_pct, threshold)
+            return True
+        return False
 
     def _check_daily_loss_cached(self) -> tuple[bool, str]:
         """일일 최대 손실을 체크한다 (실현 손익 기준)."""
@@ -156,8 +212,15 @@ class RiskManager:
         now = datetime.now()
         if self._cash_cache and self._cash_cache_time and (now - self._cash_cache_time).total_seconds() < 30:
             return self._cash_cache
-        self._cash_cache = self.kis.get_cash_balance()
-        self._cash_cache_time = now
+        try:
+            fresh = self.kis.get_cash_balance()
+            self._cash_cache = fresh
+            self._cash_cache_time = now
+        except Exception as e:
+            logger.warning("현금 잔고 조회 실패: %s (캐시 사용)", e)
+            if self._cash_cache:
+                return self._cash_cache
+            return {"cash": 0, "total_eval": 0, "total_pnl": 0}
         return self._cash_cache
 
     @staticmethod
@@ -196,6 +259,18 @@ class RiskManager:
             max_invest = base_amount / max_stocks
             max_by_cash = available_cash * 0.95  # 현금의 95%까지만 사용
             invest_amount = min(max_invest, max_by_cash)
+
+            # 변동성 기반 포지션 사이징: ATR%가 높으면 투자금 축소
+            atr_pct = self._atr_pct_cache.get(symbol, 0)
+            if atr_pct > 0:
+                target_risk = 2.0  # 기준 ATR%
+                sizing_factor = target_risk / max(atr_pct, 0.5)
+                sizing_factor = min(max(sizing_factor, 0.3), 1.5)  # 0.3x ~ 1.5x
+                invest_amount *= sizing_factor
+                logger.info(
+                    "변동성 사이징: %s | ATR=%.1f%%, 배율=%.2fx, 조정액=%s",
+                    symbol, atr_pct, sizing_factor, f"{invest_amount:,.0f}",
+                )
 
             # US 주식: 원화 예산을 달러로 변환하여 수량 계산
             if market == "US":
@@ -239,6 +314,7 @@ class RiskManager:
             return
 
         atr_pct = atr / price * 100
+        self._atr_pct_cache[symbol] = atr_pct
 
         # ATR 기반 동적 계산 (최소/최대 범위 제한)
         dynamic_stop = min(max(atr_pct * ATR_STOP_LOSS_MULTIPLIER, 2.0), self.stop_loss_pct)

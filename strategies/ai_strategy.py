@@ -73,6 +73,7 @@ class AIStrategy(BaseStrategy):
         # 현재 분석 중인 종목 정보
         self._stock_name: str = ""
         self._stock_symbol: str = ""
+        self._minute_df: pd.DataFrame | None = None  # 분봉 데이터 (장중 컨텍스트)
         self._last_ai_call: float = 0  # rate limit 방어용 타임스탬프
 
     def analyze(self, df: pd.DataFrame) -> StrategyResult:
@@ -129,6 +130,10 @@ class AIStrategy(BaseStrategy):
         """현재 분석 종목 정보를 설정한다 (전략 실행 전 호출)."""
         self._stock_symbol = symbol
         self._stock_name = name
+
+    def set_minute_data(self, df: pd.DataFrame | None):
+        """장중 분봉 데이터를 설정한다 (AI 프롬프트에 포함)."""
+        self._minute_df = df
 
     # ── 프롬프트 구성 ─────────────────────────────────────
 
@@ -204,6 +209,22 @@ class AIStrategy(BaseStrategy):
         lines.append(f"MACD Histogram: {latest['macd_hist']:.2f} ({'상승' if latest['macd_hist'] > 0 else '하락'} 모멘텀)")
         lines.append(f"볼린저밴드 위치: {bb_position:.2f} (0=하단, 0.5=중심, 1=상단)")
         lines.append(f"ATR 변동성: {latest['atr_pct']:.2f}% ({'고변동' if latest['atr_pct'] > 3 else '저변동' if latest['atr_pct'] < 1 else '보통'})")
+
+        # 장중 분봉 데이터 (설정된 경우)
+        if self._minute_df is not None and len(self._minute_df) >= 4:
+            mdf = self._minute_df.tail(8)  # 최근 8봉 (약 4시간분)
+            lines.append(f"\n[장중 60분봉 (최근 {len(mdf)}봉)]")
+            lines.append("시각 | 시가 | 고가 | 저가 | 종가 | 거래량")
+            for _, row in mdf.iterrows():
+                lines.append(
+                    f"{row['date']} | {row['open']:,.0f} | {row['high']:,.0f} | "
+                    f"{row['low']:,.0f} | {row['close']:,.0f} | {row['volume']:,}"
+                )
+            # 장중 흐름 요약
+            first = mdf.iloc[0]
+            last = mdf.iloc[-1]
+            intraday_chg = (last["close"] - first["open"]) / first["open"] * 100 if first["open"] > 0 else 0
+            lines.append(f"장중 흐름: {intraday_chg:+.2f}% (시가 {first['open']:,.0f} → 현재 {last['close']:,.0f})")
 
         if self._market_context:
             lines.append(f"\n{self._market_context}")

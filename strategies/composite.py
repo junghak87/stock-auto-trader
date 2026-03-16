@@ -12,13 +12,29 @@ from .base import BaseStrategy, Signal, StrategyResult
 
 logger = logging.getLogger(__name__)
 
-# 전략별 가중치 — AI가 가장 높은 비중
-STRATEGY_WEIGHTS = {
-    "MA_Cross": 1.0,
-    "RSI": 1.0,
-    "MACD": 1.0,
-    "BB_ATR": 1.5,      # 볼린저+ATR은 높은 비중
-    "AI": 2.0,           # AI는 2배 가중치
+# 전략별 가중치 — 레짐별 동적 조정
+REGIME_WEIGHTS = {
+    "BULL": {
+        "MA_Cross": 0.5,     # 추세 추종 보조
+        "RSI": 1.0,          # 과매수 신호 줄임 (상승장에서 잦은 매도 방지)
+        "MACD": 2.0,         # 모멘텀 추종 강화
+        "BB_ATR": 1.0,       # 밴드 반전 약화
+        "AI": 2.5,
+    },
+    "BEAR": {
+        "MA_Cross": 0.3,     # 일봉 크로스 의존 최소화
+        "RSI": 2.0,          # 과매도 반등 포착 강화
+        "MACD": 1.0,         # 모멘텀 의존 줄임
+        "BB_ATR": 2.0,       # 밴드 하단 반등 강화
+        "AI": 3.0,           # AI 판단 최대 의존
+    },
+    "SIDEWAYS": {
+        "MA_Cross": 0.5,
+        "RSI": 1.5,
+        "MACD": 1.5,
+        "BB_ATR": 1.5,
+        "AI": 2.5,
+    },
 }
 DEFAULT_WEIGHT = 1.0
 
@@ -65,6 +81,13 @@ class CompositeStrategy(BaseStrategy):
 
         self.strategies = base_strategies
         self.min_score = min_score
+        self._regime = "SIDEWAYS"
+        self._minute_df = None
+
+    def set_regime(self, regime: str):
+        """시장 레짐을 설정한다 (BULL/BEAR/SIDEWAYS)."""
+        if regime in REGIME_WEIGHTS:
+            self._regime = regime
 
     def set_market_context(self, context: str):
         """AI 전략에 시장 컨텍스트를 전달한다."""
@@ -75,6 +98,36 @@ class CompositeStrategy(BaseStrategy):
         """AI 전략에 현재 분석 종목 정보를 전달한다."""
         if self._ai_strategy:
             self._ai_strategy.set_stock_info(symbol, name)
+
+    def set_minute_data(self, df):
+        """AI 전략에 장중 분봉 데이터를 전달한다."""
+        self._minute_df = df
+        if self._ai_strategy:
+            self._ai_strategy.set_minute_data(df)
+
+    def _calc_minute_momentum(self) -> float:
+        """분봉 데이터에서 장중 모멘텀 보정값을 계산한다.
+
+        Returns:
+            -0.15 ~ +0.15 범위의 보정값.
+            양수: 장중 상승 흐름 → 매수 시그널 강화 / 매도 시그널 약화
+            음수: 장중 하락 흐름 → 매수 시그널 약화 / 매도 시그널 강화
+        """
+        if self._minute_df is None or len(self._minute_df) < 3:
+            return 0.0
+
+        mdf = self._minute_df
+        # 최근 분봉의 종가 변화율 (시가 대비)
+        first_close = mdf["close"].iloc[0]
+        last_close = mdf["close"].iloc[-1]
+        if first_close <= 0:
+            return 0.0
+
+        intraday_pct = (last_close - first_close) / first_close * 100
+        # -0.15 ~ +0.15 범위로 클램프 (1% 등락 = ±0.15 보정)
+        momentum = max(-0.15, min(0.15, intraday_pct * 0.15))
+        self._minute_df = None  # 사용 후 초기화 (종목 간 오염 방지)
+        return momentum
 
     def analyze(self, df: pd.DataFrame) -> StrategyResult:
         results: list[StrategyResult] = []
@@ -97,13 +150,16 @@ class CompositeStrategy(BaseStrategy):
         # AI 결과 분리
         ai_result = next((r for r in results if r.strategy_name == "AI"), None)
 
+        # 레짐별 가중치 적용
+        weights = REGIME_WEIGHTS.get(self._regime, REGIME_WEIGHTS["SIDEWAYS"])
+
         # 가중 점수 계산 — 활성 투표자(BUY/SELL) 기준
         buy_score = 0.0
         sell_score = 0.0
         active_weight = 0.0  # 시그널을 낸 전략의 가중치 합
 
         for r in results:
-            weight = STRATEGY_WEIGHTS.get(r.strategy_name, DEFAULT_WEIGHT)
+            weight = weights.get(r.strategy_name, DEFAULT_WEIGHT)
             if r.signal == Signal.BUY and r.strength > 0.1:
                 buy_score += weight * r.strength
                 active_weight += weight
@@ -157,21 +213,27 @@ class CompositeStrategy(BaseStrategy):
         min_voters_buy = 1 if ai_agrees_buy else 2
         min_voters_sell = 1 if ai_agrees_sell else 2
 
+        # 분봉 기반 장중 모멘텀 보정
+        momentum = self._calc_minute_momentum()
+        momentum_tag = f", 장중보정:{momentum:+.2f}" if momentum != 0 else ""
+
         # 가중 점수 기반 시그널 결정
         if buy_ratio >= self.min_score and buy_voters >= min_voters_buy:
+            adjusted = min(1.0, max(0.1, buy_ratio + momentum))
             return StrategyResult(
                 signal=Signal.BUY,
-                strength=min(1.0, buy_ratio),
+                strength=adjusted,
                 strategy_name=self.name,
-                detail=f"매수 (점수: {buy_ratio:.2f}, {buy_voters}개 전략 동의) [{details}]",
+                detail=f"매수 (점수: {buy_ratio:.2f}{momentum_tag}, {buy_voters}개 전략 동의) [{details}]",
             )
 
         if sell_ratio >= self.min_score and sell_voters >= min_voters_sell:
+            adjusted = min(1.0, max(0.1, sell_ratio - momentum))
             return StrategyResult(
                 signal=Signal.SELL,
-                strength=min(1.0, sell_ratio),
+                strength=adjusted,
                 strategy_name=self.name,
-                detail=f"매도 (점수: {sell_ratio:.2f}, {sell_voters}개 전략 동의) [{details}]",
+                detail=f"매도 (점수: {sell_ratio:.2f}{momentum_tag}, {sell_voters}개 전략 동의) [{details}]",
             )
 
         if buy_score == 0 and sell_score == 0:

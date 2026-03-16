@@ -166,11 +166,26 @@ class KiwoomClient:
             return self._name_cache[symbol]
         try:
             data = self._post("/api/dostk/stkinfo", "ka10002", body={"stk_cd": symbol})
+            # 최상위 또는 중첩 구조에서 종목명 추출
             name = data.get("stk_nm", "")
+            if not name:
+                # 중첩 구조 fallback: 첫 번째 리스트 아이템에서 추출
+                for key, val in data.items():
+                    if isinstance(val, list) and val and isinstance(val[0], dict):
+                        name = val[0].get("stk_nm", "") or val[0].get("isu_nm", "")
+                        if name:
+                            break
+                    elif isinstance(val, dict):
+                        name = val.get("stk_nm", "") or val.get("isu_nm", "")
+                        if name:
+                            break
+            if not name:
+                logger.debug("종목명 조회 실패 (%s): 응답 키=%s", symbol, list(data.keys()))
             if name:
                 self._name_cache[symbol] = name
             return name
-        except Exception:
+        except Exception as e:
+            logger.debug("종목명 API 호출 실패 (%s): %s", symbol, e)
             return ""
 
     # ── 국내 주식 시세 ────────────────────────────────────
@@ -427,9 +442,13 @@ class KiwoomClient:
             current_price = self._p(item.get("cur_prc", 0))
             pnl = float(item.get("evltv_prft", 0))
             pnl_pct = float(item.get("prft_rt", 0))
+            sym = item.get("stk_cd", "")
+            name = item.get("stk_nm", "")
+            if sym and name:
+                self._name_cache[sym] = name
             positions.append(Position(
-                symbol=item.get("stk_cd", ""),
-                name=item.get("stk_nm", ""),
+                symbol=sym,
+                name=name,
                 qty=qty,
                 avg_price=avg_price,
                 current_price=current_price,

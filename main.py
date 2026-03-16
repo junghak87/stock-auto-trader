@@ -199,6 +199,9 @@ def build_components(is_live: bool) -> dict:
     executor.split_buy_dip_pct = settings.trading.split_buy_dip_pct
     executor.split_sell_enabled = settings.trading.split_sell_enabled
     executor.split_sell_first_ratio = settings.trading.split_sell_first_ratio
+    # 포지션 교체 설정
+    executor.position_replace_enabled = settings.trading.position_replace_enabled
+    executor.replace_min_strength = settings.trading.position_replace_min_strength
 
     # 감시 종목 동기화 (.env ↔ DB)
     database.sync_watchlist_from_config(
