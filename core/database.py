@@ -155,6 +155,27 @@ class Database:
             ).fetchone()
         return row["cnt"] if row else 0
 
+    def get_first_buy_date(self, symbol: str, market: str) -> str | None:
+        """종목의 최초 매수 일시를 반환한다 (매도 이후 재매수 고려)."""
+        with self._connect() as conn:
+            # 가장 최근 매도 이후의 첫 매수를 찾는다
+            last_sell = conn.execute(
+                "SELECT MAX(timestamp) as ts FROM trades WHERE symbol = ? AND market = ? AND side = 'sell' AND success = 1",
+                (symbol, market),
+            ).fetchone()
+
+            if last_sell and last_sell["ts"]:
+                row = conn.execute(
+                    "SELECT MIN(timestamp) as ts FROM trades WHERE symbol = ? AND market = ? AND side = 'buy' AND success = 1 AND timestamp > ?",
+                    (symbol, market, last_sell["ts"]),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT MIN(timestamp) as ts FROM trades WHERE symbol = ? AND market = ? AND side = 'buy' AND success = 1",
+                    (symbol, market),
+                ).fetchone()
+        return row["ts"] if row and row["ts"] else None
+
     # ── 시세 데이터 ───────────────────────────────────────
 
     def save_market_data(

@@ -88,8 +88,8 @@ class TradingJobs:
                 self.db.clear_ai_watchlist("KR")
                 picks = self.scanner.scan_and_select()
                 if picks:
-                    names = ", ".join(f"{p['symbol']}" for p in picks)
-                    self.notifier.notify_system(f"AI 스캔 신규 종목: {names}")
+                    pick_lines = [f"  {p['symbol']} — {p.get('reason', '')}" for p in picks]
+                    self.notifier.notify_system(f"AI 스캔 신규 종목 ({len(picks)}개):\n" + "\n".join(pick_lines))
                     kr_stocks = self._get_kr_stocks()  # 갱신
             except Exception as e:
                 logger.error("AI 종목 스캔 실패: %s", e)
@@ -240,7 +240,9 @@ class TradingJobs:
         loss_count = sum(1 for t in sell_trades if t.get("strategy") == "stop_loss")
 
         self.db.save_daily_summary(total_trades, total_pnl, win_count, loss_count)
-        self.notifier.notify_daily_summary(total_trades, total_pnl, positions, cash_info=cash_info)
+        # 오늘 시그널/거래가 0건이면 정산 알림에 표시
+        no_signal_msg = "" if total_trades > 0 else "\n⚠ 오늘 매매 시그널 없음 — 전 종목 관망"
+        self.notifier.notify_daily_summary(total_trades, total_pnl, positions, cash_info=cash_info, extra_msg=no_signal_msg)
 
         # 전략별 성과 저장
         try:
@@ -318,16 +320,20 @@ class TradingJobs:
                         self.executor.execute_signal(symbol, "KR", sell_result)
                         sold.append(f"{symbol}({pos.pnl_pct:+.1f}%)")
 
-            msg_parts = []
+            msg_lines = ["종목 로테이션:"]
+            # AI 시장 분석 요약
+            if self.scanner.last_summary:
+                msg_lines.append(f"시장: {self.scanner.last_summary}")
             if picks:
-                names = ", ".join(p["symbol"] for p in picks)
-                msg_parts.append(f"+{len(picks)} ({names})")
+                msg_lines.append(f"\n신규 (+{len(picks)}):")
+                for p in picks:
+                    msg_lines.append(f"  {p['symbol']} — {p.get('reason', '')}")
             if sold:
-                msg_parts.append(f"매도 {', '.join(sold)}")
+                msg_lines.append(f"\n매도: {', '.join(sold)}")
             if removed:
-                msg_parts.append(f"-{len(removed)} ({', '.join(removed)})")
-            if msg_parts:
-                self.notifier.notify_system(f"종목 로테이션: {' / '.join(msg_parts)}")
+                msg_lines.append(f"제거: {', '.join(removed)}")
+            if picks or sold or removed:
+                self.notifier.notify_system("\n".join(msg_lines))
             else:
                 logger.info("로테이션 결과: 변경 없음")
         except Exception as e:
@@ -381,16 +387,19 @@ class TradingJobs:
                         self.executor.execute_signal(symbol, "US", sell_result)
                         sold.append(f"{symbol}({pos.pnl_pct:+.1f}%)")
 
-            msg_parts = []
+            msg_lines = ["US 종목 로테이션:"]
+            if self.scanner.last_summary:
+                msg_lines.append(f"시장: {self.scanner.last_summary}")
             if picks:
-                names = ", ".join(p["symbol"] for p in picks)
-                msg_parts.append(f"+{len(picks)} ({names})")
+                msg_lines.append(f"\n신규 (+{len(picks)}):")
+                for p in picks:
+                    msg_lines.append(f"  {p['symbol']} — {p.get('reason', '')}")
             if sold:
-                msg_parts.append(f"매도 {', '.join(sold)}")
+                msg_lines.append(f"\n매도: {', '.join(sold)}")
             if removed:
-                msg_parts.append(f"-{len(removed)} ({', '.join(removed)})")
-            if msg_parts:
-                self.notifier.notify_system(f"US 종목 로테이션: {' / '.join(msg_parts)}")
+                msg_lines.append(f"제거: {', '.join(removed)}")
+            if picks or sold or removed:
+                self.notifier.notify_system("\n".join(msg_lines))
             else:
                 logger.info("US 로테이션 결과: 변경 없음")
         except Exception as e:
@@ -417,8 +426,8 @@ class TradingJobs:
                 self.db.clear_ai_watchlist("US")
                 picks = self.scanner.scan_us_and_select()
                 if picks:
-                    names = ", ".join(f"{p['symbol']}" for p in picks)
-                    self.notifier.notify_system(f"AI US 스캔 신규 종목: {names}")
+                    pick_lines = [f"  {p['symbol']} — {p.get('reason', '')}" for p in picks]
+                    self.notifier.notify_system(f"AI US 스캔 신규 종목 ({len(picks)}개):\n" + "\n".join(pick_lines))
                     us_stocks = self._get_us_stocks()  # 갱신
             except Exception as e:
                 logger.error("AI US 종목 스캔 실패: %s", e)
@@ -502,6 +511,12 @@ class TradingJobs:
                     logger.info("[%s] 이미 손절 실행됨 — 익절 스킵", pos.symbol)
                     continue
                 self.executor.execute_take_profit(pos.symbol, pos.market, pos.qty)
+
+            # 장기 횡보 종목 자동 청산 (보유 3일 초과 + 수익률 ±1% 이내)
+            try:
+                self.executor.check_stale_positions(market)
+            except Exception as e:
+                logger.error("장기 횡보 청산 체크 실패: %s", e)
 
             # 분할 매수는 거래 가능 상태일 때만
             can_trade, reason = self.risk.can_trade()

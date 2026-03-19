@@ -262,14 +262,18 @@ def setup_scheduler(jobs: TradingJobs, supported_markets: list[str]) -> Backgrou
     # ── 국내 장 스케줄 (월~금) ────────────────────────────
     if "KR" in supported_markets:
         scheduler.add_job(jobs.job_kr_market_open, CronTrigger(day_of_week="mon-fri", hour=8, minute=50))
-        scheduler.add_job(
-            jobs.job_kr_strategy_run,
-            CronTrigger(day_of_week="mon-fri", hour="9-15", minute="0,15,30,45"),
-        )
+        # 일봉 기반 전략: 핵심 시점만 4회 (09:05, 11:30, 13:00, 15:10)
+        for h, m in [(9, 5), (11, 30), (13, 0), (15, 10)]:
+            scheduler.add_job(
+                jobs.job_kr_strategy_run,
+                CronTrigger(day_of_week="mon-fri", hour=h, minute=m),
+            )
+        # 리스크 체크 (손절/익절/분할매수): 매 5분 유지
         scheduler.add_job(
             jobs.job_kr_risk_check,
             CronTrigger(day_of_week="mon-fri", hour="9-15", minute="5,10,20,25,35,40,50,55"),
         )
+        # 꼬리 매매 (분봉 기반): 매 3분 유지 — 분봉 데이터는 계속 바뀌므로 의미 있음
         scheduler.add_job(
             jobs.job_kr_tail_trading,
             CronTrigger(day_of_week="mon-fri", hour="9-15", minute="3,6,9,12,18,21,24,27,33,36,39,42,48,51,54,57"),
@@ -283,14 +287,14 @@ def setup_scheduler(jobs: TradingJobs, supported_markets: list[str]) -> Backgrou
     # ── 해외 장 스케줄 (화~토, 한국 시간 기준) ────────────
     if "US" in supported_markets:
         scheduler.add_job(jobs.job_us_market_open, CronTrigger(day_of_week="mon-fri", hour=23, minute=20))
-        scheduler.add_job(
-            jobs.job_us_strategy_run,
-            CronTrigger(day_of_week="mon-fri", hour=23, minute="30,45"),
-        )
-        scheduler.add_job(
-            jobs.job_us_strategy_run,
-            CronTrigger(day_of_week="tue-sat", hour="0-5", minute="0,15,30,45"),
-        )
+        # 일봉 기반 전략: 핵심 시점 4회 (23:35, 01:00, 03:00, 05:30)
+        scheduler.add_job(jobs.job_us_strategy_run, CronTrigger(day_of_week="mon-fri", hour=23, minute=35))
+        for h, m in [(1, 0), (3, 0), (5, 30)]:
+            scheduler.add_job(
+                jobs.job_us_strategy_run,
+                CronTrigger(day_of_week="tue-sat", hour=h, minute=m),
+            )
+        # 리스크 체크: 매 5분 유지
         scheduler.add_job(
             jobs.job_us_risk_check,
             CronTrigger(day_of_week="mon-fri", hour=23, minute="35,40,50,55"),

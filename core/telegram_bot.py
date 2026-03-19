@@ -139,7 +139,7 @@ class TelegramNotifier:
 
     def notify_daily_summary(
         self, total_trades: int, total_pnl: float, positions: list,
-        cash_info: dict | None = None,
+        cash_info: dict | None = None, extra_msg: str = "",
     ):
         """일일 수익률 요약 알림 (계좌 잔고 포함)."""
         pnl_emoji = "📈" if total_pnl >= 0 else "📉"
@@ -173,6 +173,8 @@ class TelegramNotifier:
             msg += f"  <b>보유 합계: {total_stock_pnl:+,.0f}원</b>\n"
         else:
             msg += "  없음\n"
+        if extra_msg:
+            msg += extra_msg + "\n"
         self.send(msg)
 
     def notify_error(self, error_msg: str):

@@ -88,6 +88,7 @@ class StockScanner:
         self.budget_per_stock = budget_per_stock
         self.us_candidates = us_candidates or []
         self.last_drops: list[str] = []
+        self.last_summary: str = ""  # AI 시장 분석 요약
         self._last_ai_call: float = 0  # rate limit 방어용 타임스탬프
         self._market_context: str = ""  # 시장 지수 컨텍스트
 
@@ -126,7 +127,7 @@ class StockScanner:
             ]
             filtered = before - len(volume_rank)
             if filtered > 0:
-                logger.info("예산 필터: %d개 종목 제외 (종목당 한도: %s원)", filtered, f"{self.budget_per_stock:,.0f}")
+                logger.info("예산 필터: %d개 종목 제외 (종목당 한도: %,.0f원)", filtered, self.budget_per_stock)
 
         if not volume_rank:
             logger.info("예산 내 매수 가능 종목 없음 -- 스캔 스킵")
@@ -410,6 +411,7 @@ class StockScanner:
             summary = data.get("summary", "")
 
             if summary:
+                self.last_summary = summary
                 logger.info("AI 시장 분석: %s", summary)
 
             return picks[:7]

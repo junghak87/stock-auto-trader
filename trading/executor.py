@@ -245,7 +245,7 @@ class TradingExecutor:
                     replaced = self._try_replace_position(symbol, market, result)
                     if replaced:
                         return replaced
-                logger.info("현금 부족 — 매수 스킵: %s (잔고: %s)", symbol, f"{available_cash:,.0f}")
+                logger.info("현금 부족 — 매수 스킵: %s (잔고: %,.0f)", symbol, available_cash)
                 return None
 
             if market == "KR":
@@ -421,7 +421,7 @@ class TradingExecutor:
         available_cash = cash_info.get("cash", 0)
         min_cash = 50_000 if market == "KR" else 50
         if available_cash < min_cash:
-            logger.info("분할 매수 스킵 — 현금 부족: %s (잔고: %s)", symbol, f"{available_cash:,.0f}")
+            logger.info("분할 매수 스킵 — 현금 부족: %s (잔고: %,.0f)", symbol, available_cash)
             return None
 
         try:
@@ -492,6 +492,62 @@ class TradingExecutor:
                     if not cancelled:
                         logger.warning("미체결 주문 추적 포기 (%.0f초 경과): %s", elapsed, info["symbol"])
                     del self._pending_orders[key]
+
+    def check_stale_positions(self, market: str, max_hold_days: int = 3, stale_pnl_pct: float = 1.0):
+        """보유 기간 초과 + 횡보 종목을 자동 청산한다.
+
+        Args:
+            market: "KR" 또는 "US"
+            max_hold_days: 최대 보유 일수 (기본 3일)
+            stale_pnl_pct: 횡보 판단 기준 수익률 범위 (±1%)
+        """
+        positions = self._get_cached_positions(market)
+        if not positions:
+            return
+
+        now = datetime.now()
+        for pos in positions:
+            if pos.qty <= 0:
+                continue
+
+            # DB에서 최초 매수일 조회
+            try:
+                buy_record = self.db.get_first_buy_date(pos.symbol, market)
+                if not buy_record:
+                    continue
+                buy_date = datetime.fromisoformat(buy_record)
+                hold_days = (now - buy_date).days
+            except Exception:
+                continue
+
+            if hold_days < max_hold_days:
+                continue
+
+            # 횡보 판단: 수익률이 ±stale_pnl_pct 이내
+            if abs(pos.pnl_pct) > stale_pnl_pct:
+                continue
+
+            name = self._resolve_name(pos.symbol, market)
+            logger.info(
+                "장기 횡보 청산: %s %s | 보유 %d일, 수익률 %+.1f%%",
+                pos.symbol, name, hold_days, pos.pnl_pct,
+            )
+            self.notifier.notify_system(
+                f"장기 횡보 청산: {pos.symbol} {name}\n"
+                f"보유 {hold_days}일, 수익률 {pos.pnl_pct:+.1f}% → 자금 회전"
+            )
+
+            try:
+                if market == "KR":
+                    order = self.kis.sell_kr(pos.symbol, pos.qty, price=0)
+                else:
+                    order = self.kis.sell_us(pos.symbol, pos.qty, price=0)
+                self._log_order(order, market, "stale_position")
+                if order.success:
+                    self._position_stages.pop(pos.symbol, None)
+                    self.risk.clear_breakeven_stop(pos.symbol)
+            except Exception as e:
+                logger.error("장기 횡보 청산 실패: %s — %s", pos.symbol, e)
 
     @staticmethod
     def _round_kr_tick(price: int) -> int:

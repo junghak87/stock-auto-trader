@@ -19,21 +19,21 @@ REGIME_WEIGHTS = {
         "RSI": 1.0,          # 과매수 신호 줄임 (상승장에서 잦은 매도 방지)
         "MACD": 2.0,         # 모멘텀 추종 강화
         "BB_ATR": 1.0,       # 밴드 반전 약화
-        "AI": 2.5,
+        "AI": 1.0,           # AI는 보조 (거부권으로 충분히 기여)
     },
     "BEAR": {
         "MA_Cross": 0.3,     # 일봉 크로스 의존 최소화
         "RSI": 2.0,          # 과매도 반등 포착 강화
         "MACD": 1.0,         # 모멘텀 의존 줄임
         "BB_ATR": 2.0,       # 밴드 하단 반등 강화
-        "AI": 3.0,           # AI 판단 최대 의존
+        "AI": 1.5,           # 하락장에선 AI 약간 강화
     },
     "SIDEWAYS": {
         "MA_Cross": 0.5,
         "RSI": 1.5,
         "MACD": 1.5,
         "BB_ATR": 1.5,
-        "AI": 2.5,
+        "AI": 1.0,           # AI는 보조 역할
     },
 }
 DEFAULT_WEIGHT = 1.0
@@ -174,6 +174,11 @@ class CompositeStrategy(BaseStrategy):
         details_parts = [f"{r.strategy_name}:{r.signal.value}({r.strength:.1f})" for r in results]
         details = " | ".join(details_parts)
 
+        # AI 판단 사유를 별도로 추출 (알림에 표시용)
+        ai_reason = ""
+        if ai_result and ai_result.detail:
+            ai_reason = ai_result.detail  # "AI: 근거 요약" 형태
+
         # 활성 투표자 수 (최소 2개 전략이 같은 방향이어야 시그널)
         buy_voters = sum(1 for r in results if r.signal == Signal.BUY and r.strength > 0.1)
         sell_voters = sum(1 for r in results if r.signal == Signal.SELL and r.strength > 0.1)
@@ -186,7 +191,7 @@ class CompositeStrategy(BaseStrategy):
                     signal=Signal.HOLD,
                     strength=0,
                     strategy_name=self.name,
-                    detail=f"AI 거부권 (기술지표 매수 but AI 매도) [{details}]",
+                    detail=f"AI 거부권 (기술지표 매수 but AI 매도)\n{ai_reason}\n[{details}]",
                 )
             if sell_ratio >= self.min_score and ai_result.signal == Signal.BUY:
                 logger.info("AI 거부권 발동: 기술지표 매도 vs AI 매수 → HOLD")
@@ -194,28 +199,22 @@ class CompositeStrategy(BaseStrategy):
                     signal=Signal.HOLD,
                     strength=0,
                     strategy_name=self.name,
-                    detail=f"AI 거부권 (기술지표 매도 but AI 매수) [{details}]",
+                    detail=f"AI 거부권 (기술지표 매도 but AI 매수)\n{ai_reason}\n[{details}]",
                 )
 
-        # AI 단독 매매: AI 확신도 >= 0.6이면 다른 전략 동의 없이 시그널 발생
-        if ai_result and ai_result.signal != Signal.HOLD and ai_result.strength >= 0.6:
-            logger.info("AI 단독 매매: %s (강도: %.2f)", ai_result.signal.value, ai_result.strength)
-            return StrategyResult(
-                signal=ai_result.signal,
-                strength=ai_result.strength,
-                strategy_name=self.name,
-                detail=f"AI 단독 {ai_result.signal.value} (강도: {ai_result.strength:.2f}) [{details}]",
-            )
-
-        # AI가 동의하면 1개 전략 동의로도 시그널 발생
-        ai_agrees_buy = ai_result and ai_result.signal == Signal.BUY and ai_result.strength > 0.1
-        ai_agrees_sell = ai_result and ai_result.signal == Signal.SELL and ai_result.strength > 0.1
+        # AI 단독 매매 제거 — AI는 거부권 + 가중 투표 보조 역할만
+        # AI가 동의하면 최소 투표자 수를 1로 완화
+        ai_agrees_buy = ai_result and ai_result.signal == Signal.BUY and ai_result.strength > 0.3
+        ai_agrees_sell = ai_result and ai_result.signal == Signal.SELL and ai_result.strength > 0.3
         min_voters_buy = 1 if ai_agrees_buy else 2
         min_voters_sell = 1 if ai_agrees_sell else 2
 
         # 분봉 기반 장중 모멘텀 보정
         momentum = self._calc_minute_momentum()
         momentum_tag = f", 장중보정:{momentum:+.2f}" if momentum != 0 else ""
+
+        # AI 사유 태그 (있으면 줄바꿈으로 추가)
+        reason_tag = f"\n{ai_reason}" if ai_reason else ""
 
         # 가중 점수 기반 시그널 결정
         if buy_ratio >= self.min_score and buy_voters >= min_voters_buy:
@@ -224,7 +223,7 @@ class CompositeStrategy(BaseStrategy):
                 signal=Signal.BUY,
                 strength=adjusted,
                 strategy_name=self.name,
-                detail=f"매수 (점수: {buy_ratio:.2f}{momentum_tag}, {buy_voters}개 전략 동의) [{details}]",
+                detail=f"매수 (점수: {buy_ratio:.2f}{momentum_tag}, {buy_voters}개 전략 동의){reason_tag}\n[{details}]",
             )
 
         if sell_ratio >= self.min_score and sell_voters >= min_voters_sell:
@@ -233,7 +232,7 @@ class CompositeStrategy(BaseStrategy):
                 signal=Signal.SELL,
                 strength=adjusted,
                 strategy_name=self.name,
-                detail=f"매도 (점수: {sell_ratio:.2f}{momentum_tag}, {sell_voters}개 전략 동의) [{details}]",
+                detail=f"매도 (점수: {sell_ratio:.2f}{momentum_tag}, {sell_voters}개 전략 동의){reason_tag}\n[{details}]",
             )
 
         if buy_score == 0 and sell_score == 0:
